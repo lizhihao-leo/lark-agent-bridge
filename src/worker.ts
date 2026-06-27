@@ -3,23 +3,19 @@ import { logger } from './logger.js'
 import { startConsumer } from './lark/consume.js'
 import { replyText } from './lark/reply.js'
 import { chat } from './llm.js'
-import { SessionStore } from './sessions.js'
+import { Store } from './store.js'
 import type { FeishuMessageEvent } from './lark/types.js'
 
-const sessions = new SessionStore()
-const seenEvents = new Set<string>()
-const SEEN_LIMIT = 5000 // simple LRU-ish bound; Phase 2 replaces with SQLite
+const store = new Store(config.STORE_PATH)
 
-function rememberEvent(id: string): boolean {
-  if (seenEvents.has(id)) return false
-  seenEvents.add(id)
-  if (seenEvents.size > SEEN_LIMIT) {
-    // Drop the oldest ~1k entries; Set iteration order is insertion order.
-    const drop = Array.from(seenEvents).slice(0, 1000)
-    for (const k of drop) seenEvents.delete(k)
-  }
-  return true
+// Prune dedup entries on startup and hourly thereafter.
+function prune(): void {
+  const removed = store.pruneSeenEvents(config.SEEN_EVENT_TTL_DAYS * 24 * 3600 * 1000)
+  if (removed > 0) logger.debug({ removed }, 'pruned seen_events')
 }
+prune()
+const pruneTimer = setInterval(prune, 3600 * 1000)
+pruneTimer.unref()
 
 async function handle(evt: FeishuMessageEvent): Promise<void> {
   if (evt.message_type !== 'text') {
@@ -42,7 +38,8 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     'incoming message',
   )
 
-  const history = sessions.append(evt.chat_id, { role: 'user', content: userText })
+  store.appendMessage(evt.chat_id, 'user', userText)
+  const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
 
   let reply: string
   try {
@@ -54,18 +51,18 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     reply = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
   }
 
-  sessions.append(evt.chat_id, { role: 'assistant', content: reply })
+  store.appendMessage(evt.chat_id, 'assistant', reply)
   await replyText({ messageId: evt.message_id, text: reply })
 }
 
 export function run(): { stop: () => Promise<void> } {
   logger.info({ model: config.ANTHROPIC_MODEL, key: config.LARK_EVENT_KEY }, 'bridge starting')
 
-  const { stop } = startConsumer({
+  const { stop: stopConsumer } = startConsumer({
     eventKey: config.LARK_EVENT_KEY,
     as: config.LARK_EVENT_AS,
     onEvent: (evt) => {
-      if (!rememberEvent(evt.event_id)) {
+      if (!store.claimEvent(evt.event_id)) {
         logger.debug({ event_id: evt.event_id }, 'duplicate event, skipped')
         return
       }
@@ -73,5 +70,11 @@ export function run(): { stop: () => Promise<void> } {
     },
   })
 
-  return { stop }
+  return {
+    stop: async () => {
+      clearInterval(pruneTimer)
+      await stopConsumer()
+      store.close()
+    },
+  }
 }

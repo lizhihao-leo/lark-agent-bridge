@@ -32,6 +32,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.5",
     "pino": "^9.5.0",
     "pino-pretty": "^11.3.0",

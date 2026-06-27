@@ -15,6 +15,9 @@ const Env = z.object({
   MAX_HISTORY_TURNS: z.coerce.number().int().positive().default(12),
   MAX_TOKENS_REPLY: z.coerce.number().int().positive().default(1024),
 
+  STORE_PATH: z.string().min(1).default('data/bridge.sqlite'),
+  SEEN_EVENT_TTL_DAYS: z.coerce.number().int().positive().default(7),
+
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 })
 
