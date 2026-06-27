@@ -1,0 +1,48 @@
+{
+  "name": "lark-agent-bridge",
+  "version": "0.1.0",
+  "description": "Bridge Feishu/Lark events to any LLM agent via lark-cli — long-polling, zero webhook, drop-in for openclaw-style bots.",
+  "type": "module",
+  "license": "MIT",
+  "author": "lizhihao-leo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lizhihao-leo/lark-agent-bridge.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "bin": {
+    "lark-agent-bridge": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier -w ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "eslint": "^9.9.0",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.2",
+    "typescript-eslint": "^8.6.0"
+  }
+}

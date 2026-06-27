@@ -1,0 +1,26 @@
+# node
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+
+# editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# runtime data
+data/
+*.sqlite
+*.sqlite-journal
+
+# coverage / cache
+coverage/
+.cache/
+.npm/
