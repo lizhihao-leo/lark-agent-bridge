@@ -58,7 +58,7 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   await replyText({ messageId: evt.message_id, text: reply })
 }
 
-export function run(): { stop: () => void } {
+export function run(): { stop: () => Promise<void> } {
   logger.info({ model: config.ANTHROPIC_MODEL, key: config.LARK_EVENT_KEY }, 'bridge starting')
 
   const { stop } = startConsumer({
