@@ -32,6 +32,16 @@ const Env = z.object({
   /** Optional bot display-name prefix to strip from group content before sending to LLM. */
   BOT_AT_PREFIX: z.string().default(''),
 
+  /**
+   * Enable the LLM tool-use loop. Requires a model that supports the
+   * Anthropic tools API (Claude on api.anthropic.com always; ARK and other
+   * compatibility proxies vary — verify before enabling).
+   */
+  ENABLE_TOOLS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 })
 
