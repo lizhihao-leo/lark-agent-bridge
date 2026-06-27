@@ -18,6 +18,20 @@ const Env = z.object({
   STORE_PATH: z.string().min(1).default('data/bridge.sqlite'),
   SEEN_EVENT_TTL_DAYS: z.coerce.number().int().positive().default(7),
 
+  /**
+   * Group-chat policy:
+   *   - 'mention': only react when content starts with '@'  (default; matches
+   *     Feishu's normal "bot @-mentioned" delivery semantics where lark-cli
+   *     pre-renders the @-prefix into the content string).
+   *   - 'all'    : react to every message in any group the bot is in.
+   *   - 'off'    : ignore group messages entirely.
+   * P2P (private) messages always go through regardless of this setting.
+   */
+  GROUP_TRIGGER: z.enum(['mention', 'all', 'off']).default('mention'),
+
+  /** Optional bot display-name prefix to strip from group content before sending to LLM. */
+  BOT_AT_PREFIX: z.string().default(''),
+
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 })
 
