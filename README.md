@@ -4,6 +4,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](.nvmrc)
+[![CI](https://github.com/lizhihao-leo/lark-agent-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/lizhihao-leo/lark-agent-bridge/actions)
+
+[简体中文](README.zh-CN.md)
 
 `lark-agent-bridge` is a thin, batteries-included bridge between **Feishu / Lark**
 events and **any Anthropic-compatible LLM** (Claude on `api.anthropic.com`,
@@ -113,11 +116,11 @@ including the failure modes the worker is designed to survive.
 ## Roadmap
 
 - [x] **Phase 0** — TypeScript skeleton, lint, format, license, env-driven config
-- [ ] **Phase 1** — systemd unit, structured logs, graceful reconnect
-- [ ] **Phase 2** — SQLite-backed session + idempotency store (survives restart)
-- [ ] **Phase 3** — group-chat `@bot` trigger, image / file / post message types, markdown / card replies
-- [ ] **Phase 4** — Tool-use loop exposing `lark-cli` subcommands to the LLM (docs / base / calendar / drive / …)
-- [ ] **Phase 5** — CI, contributing guide, first `v0.1.0` GitHub release
+- [x] **Phase 1** — systemd unit, structured logs, SIGTERM cascade, child auto-restart
+- [x] **Phase 2** — SQLite-backed session + idempotency store (survives restart)
+- [x] **Phase 3** — group-chat `@bot` trigger, multi-format messages, markdown replies
+- [x] **Phase 4** — Tool-use loop exposing a whitelisted subset of `lark-cli` to the LLM
+- [ ] **Phase 5** — Docker image, npm publish, first `v0.1.0` GitHub release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

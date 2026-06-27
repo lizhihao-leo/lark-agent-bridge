@@ -58,3 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Tool list is a hard-coded whitelist. To add more tools, edit `src/tools.ts` and review the implication of each one (read vs write, identity required, blast radius). The CLI does **not** automatically expose every lark-cli command.
+
+## [Phase 5] — release engineering
+
+### Added
+- `.github/workflows/ci.yml`: lint + typecheck + build on Node 20 and Node 22, runs on push to `main` and on every PR.
+- `CONTRIBUTING.md` (style guide, how to add a tool, release procedure), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md` (threat model + reporting).
+- Issue templates: `bug_report.md`, `feature_request.md`.
+- `README.zh-CN.md` — Simplified Chinese translation of the README.
+- CI badge in main README; Roadmap updated to show Phases 0-4 complete.
