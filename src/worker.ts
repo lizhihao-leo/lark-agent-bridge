@@ -105,36 +105,41 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     return
   }
 
-  // Image messages → vision input for the claude-code backend. We
-  // download the image to <sandbox>/in/<message_id>.<ext> and synthesise
-  // a text prompt that points the agent at it via Read. Other non-text
-  // types are still politely refused.
-  if (evt.message_type === 'image') {
+  // Image / file messages → vision-or-doc input for the claude-code
+  // backend. We download the resource to <sandbox>/in/<message_id>[.<ext>]
+  // and synthesise a text prompt that points the agent at it via Read.
+  // Other non-text types are still politely refused.
+  if (evt.message_type === 'image' || evt.message_type === 'file') {
     if (isGroup && !shouldHandleGroup(rawContent)) return
     if (config.BACKEND !== 'claude-code') {
       await reply({
         messageId: evt.message_id,
-        body: '(图片输入仅在 `BACKEND=claude-code` 后端下支持)',
+        body: `(${evt.message_type === 'image' ? '图片' : '文件'}输入仅在 \`BACKEND=claude-code\` 后端下支持)`,
         format: 'markdown',
       })
       return
     }
     if (!(await admitAndAck(evt))) return
-    await handleImageMessage(evt, rawContent)
+    await handleResourceMessage(evt, rawContent, evt.message_type)
     return
   }
 
-  // Non-text payloads (audio / file / sticker / post …): politely tell
-  // the user we don't speak that yet.
+  // Non-text payloads (audio / sticker / post …): politely tell
+  // the user we don't speak that yet. Surface to the log so operators
+  // can see what's being silently refused.
   if (evt.message_type !== 'text') {
     if (isGroup && !shouldHandleGroup(rawContent)) {
       metrics.messagesDropped.inc({ reason: 'group_filter' })
       return
     }
+    logger.info(
+      { chat: evt.chat_id, type: evt.message_type, preview: rawContent.slice(0, 80) },
+      'unsupported message type, replying with refusal',
+    )
     metrics.messagesDropped.inc({ reason: 'unsupported_type' })
     await reply({
       messageId: evt.message_id,
-      body: `(暂不支持 \`${evt.message_type}\` 类型消息,当前版本支持文本和图片。)`,
+      body: `(暂不支持 \`${evt.message_type}\` 类型消息,当前版本支持文本、图片和文件。)`,
       format: 'markdown',
     })
     return
@@ -227,35 +232,54 @@ async function admitAndAck(evt: FeishuMessageEvent): Promise<boolean> {
 }
 
 /**
- * Vision-input flow: download the image into the sandbox, synthesise a
- * user-text prompt pointing the agent at the file, and dispatch through
- * the regular claude-code pipeline.
+ * Vision/doc input flow: download the resource (image or file) into the
+ * sandbox, synthesise a user-text prompt pointing the agent at it via
+ * Read, and dispatch through the regular claude-code pipeline. Lark-cli
+ * normalises message content as:
+ *   - image  →  `<image key="img_v3_…"/>`  (sometimes `[Image: img_v3_…]`)
+ *   - file   →  `<file key="file_v3_…" name="original-name.docx"/>`
+ * We accept the key from anywhere in the string.
  */
-async function handleImageMessage(evt: FeishuMessageEvent, rawContent: string): Promise<void> {
-  // Extract `img_…` key from the content string. lark-cli normalises
-  // image messages to `[Image: img_v3_…]`, but we accept anywhere in
-  // the string to be future-proof.
-  const m = rawContent.match(/img_[A-Za-z0-9_-]+/)
+async function handleResourceMessage(
+  evt: FeishuMessageEvent,
+  rawContent: string,
+  kind: 'image' | 'file',
+): Promise<void> {
+  const keyPrefix = kind === 'image' ? 'img_' : 'file_'
+  const m = rawContent.match(new RegExp(`${keyPrefix}[A-Za-z0-9_-]+`))
   if (!m) {
     logger.warn(
-      { chat: evt.chat_id, preview: rawContent.slice(0, 80) },
-      'image message: no img_ key found in content',
+      { chat: evt.chat_id, kind, preview: rawContent.slice(0, 80) },
+      `${kind} message: no key found in content`,
     )
     await reply({
       messageId: evt.message_id,
-      body: '(无法从消息中提取 image_key,请重试)',
+      body: `(无法从消息中提取 ${kind === 'image' ? 'image_key' : 'file_key'},请重试)`,
       format: 'text',
     })
     return
   }
   const fileKey = m[0]
-  // Use the original message_id as a stable, dedup-friendly filename.
-  // lark-cli infers the extension from Content-Type when ours has none.
-  const relPath = `in/${evt.message_id}`
+
+  // Extract the original filename for files so the sandbox name + the
+  // prompt both surface something the user (and the model) recognises.
+  // Images rarely carry a meaningful filename from the lark-cli content
+  // string, so we just fall back to the message_id.
+  let baseName = evt.message_id
+  if (kind === 'file') {
+    const nm = rawContent.match(/name="([^"]+)"/)
+    if (nm?.[1]) {
+      // Sanitise: keep alphanumerics, dot, dash, underscore, CJK; drop
+      // path separators. Cap at 80 chars to avoid filesystem grief.
+      baseName = nm[1].replace(/[\\/]/g, '_').slice(0, 80)
+    }
+  }
+  const relPath = `in/${baseName}`
+
   const dl = await downloadResource({
     messageId: evt.message_id,
     fileKey,
-    type: 'image',
+    type: kind,
     output: relPath,
     cwd: config.CLAUDE_CODE_SANDBOX,
     as: 'bot',
@@ -263,22 +287,26 @@ async function handleImageMessage(evt: FeishuMessageEvent, rawContent: string): 
   if (!dl.ok) {
     await reply({
       messageId: evt.message_id,
-      body: '(图片下载失败,请稍后再试)',
+      body: `(${kind === 'image' ? '图片' : '文件'}下载失败,请稍后再试)`,
       format: 'text',
     })
     return
   }
   const finalPath = dl.output ?? relPath
   logger.info(
-    { chat: evt.chat_id, fileKey, path: finalPath },
-    'image downloaded for vision input',
+    { chat: evt.chat_id, kind, fileKey, path: finalPath },
+    `${kind} downloaded for agent input`,
   )
 
-  // Synthesise the user turn. Claude Code's Read tool can open images,
-  // so the agent self-services from a textual pointer.
-  const synthText = `用户发来了一张图片，已保存到沙箱内的 \`${finalPath}\`。请用 Read 工具查看图片，然后根据图片内容回应用户（如果用户没附文字，就描述图片或回答可能的问题）。`
+  // Synthesise the user turn. Claude Code's Read tool can open images
+  // and (for files) any binary it understands; the agent self-services
+  // from a textual pointer.
+  const synthText =
+    kind === 'image'
+      ? `用户发来了一张图片，已保存到沙箱内的 \`${finalPath}\`。请用 Read 工具查看图片，然后根据图片内容回应用户（如果用户没附文字，就描述图片或回答可能的问题）。`
+      : `用户发来了一个文件，已保存到沙箱内的 \`${finalPath}\`。请先用 Read 工具读取（如果是文本/Markdown/JSON 等直接打开；如果是 .docx/.pdf/.xlsx 等二进制文档，用 Bash 调用合适的命令行工具，例如 \`pandoc\`、\`pdftotext\`、\`unzip\` 解 docx 等），然后根据内容回应用户。`
   store.appendMessage(evt.chat_id, 'user', synthText)
-  metrics.messagesTotal.inc({ type: 'image', backend: config.BACKEND })
+  metrics.messagesTotal.inc({ type: kind, backend: config.BACKEND })
   await handleClaudeCode(evt, synthText)
 }
 
