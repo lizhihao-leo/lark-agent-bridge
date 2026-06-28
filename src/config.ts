@@ -73,11 +73,51 @@ const Env = z.object({
    * Send an immediate "⏳ 思考中…" placeholder to Feishu while Claude Code
    * is running, then recall it after the real reply lands. Improves UX for
    * the multi-second latency without needing interactive cards. Only
-   * affects BACKEND=claude-code.
+   * affects BACKEND=claude-code, and ONLY when STREAMING_CARD=false.
    */
   SHOW_THINKING_PLACEHOLDER: z
     .enum(['true', 'false'])
     .default('true')
+    .transform((v) => v === 'true'),
+
+  /**
+   * Use an interactive card as the reply surface, and PATCH it as the
+   * Claude Code agent loop streams tool-use / text events — the user
+   * sees the card visibly update (state header, growing tool log, body
+   * text) instead of a "..." placeholder swapped for one final message.
+   * Falls back to the legacy text path on send failure. Only affects
+   * BACKEND=claude-code.
+   */
+  STREAMING_CARD: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+
+  /**
+   * Card PATCH throttle in ms. Lower = snappier UI but more API calls.
+   * Feishu's rate limit on message-patch is generous; 1200 ms keeps us
+   * well under it and is below human flicker-detection threshold.
+   */
+  STREAMING_CARD_MIN_INTERVAL_MS: z.coerce.number().int().positive().default(1200),
+
+  /**
+   * Emoji reaction added to the user's message the moment we accept it
+   * for processing — visible ack before the much longer LLM round-trip.
+   * Use Feishu's emoji_type enum (OK, THUMBSUP, HEART, FINGERHEART, …).
+   * Set to empty string to disable.
+   */
+  ACK_EMOJI: z.string().default('OK'),
+
+  /**
+   * Subscribe to `card.action.trigger` events (interactive-card button
+   * callbacks) in addition to message events. Requires "callback config"
+   * to be enabled in the Feishu Developer Console for this app. When
+   * disabled (default), the regenerate button on cards will silently
+   * no-op when clicked.
+   */
+  ENABLE_CARD_CALLBACK: z
+    .enum(['true', 'false'])
+    .default('false')
     .transform((v) => v === 'true'),
 
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),

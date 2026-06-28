@@ -126,8 +126,11 @@ Read / Write / Edit / Grep + 你装的 MCP / Skills），但 cwd 锁死在
 重启不丢上下文。
 
 bridge 实时解析 NDJSON 流：tool-use 事件直落日志；回复里 `![alt](path)`
-形式引用沙箱内文件时，自动上传成飞书原生 image 消息（Phase 8），所以
-柱状图 / 二维码 / 截图直接内联显示，而不是看到一段破碎的 markdown。
+形式引用沙箱内文件时，自动上传成飞书原生 image 消息（Phase 8）；回复
+本身用**交互卡片**承载，并随 agent 进度实时 PATCH（Phase 9）——状态
+表头、工具日志逐条增长、正文文本 token 级出现。收到消息后 ~200 ms 用
+emoji（默认 `OK`）回应；完成卡片自带「🔄 重新生成」按钮（按钮回调需
+飞书后台开启回调，详见 `.env.example`）。
 
 适用：让 LLM 自主多步规划、跑命令、写文件、调外部 CLI 的场景。
 
@@ -161,7 +164,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 6** — Claude Code headless 后端（沙箱 agent loop）
 - [x] **Phase 7** — 流式输出（实时工具日志）+ "⏳ 思考中…" 占位 + user-mode systemd
 - [x] **Phase 8** — `BACKEND=claude-code` 的图片回复（沙箱内 PNG 自动上传成飞书 image 消息）
-- [ ] **Phase 9** — rate limit + 用户白名单、vision 输入、实时 card UI、Docker 镜像、npm publish、v0.1.0 Release
+- [x] **Phase 9** — 交互卡片真流式 PATCH + emoji 立即 ack + 「🔄 重新生成」按钮回调（需 `ENABLE_CARD_CALLBACK=true` 且飞书后台开启回调）
+- [ ] **Phase 10** — rate limit + 用户白名单、vision 输入、Docker 镜像、npm publish、v0.1.0 Release
 
 进度跟踪：[issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues)
 

@@ -140,10 +140,14 @@ Per-chat conversation state is preserved via Claude Code's own
 deterministic UUIDv4 in `<sandbox>/.bridge-sessions.json`.
 
 The bridge parses the streaming NDJSON output live: tool-use events go to
-the logs in real time, and `![alt](path)` markdown referencing files in
-the sandbox is automatically uploaded back to Feishu as a native image
-message (Phase 8), so charts / QR codes / screenshots render inline
-rather than appearing as broken markdown.
+the logs in real time, `![alt](path)` markdown referencing files in the
+sandbox is automatically uploaded back to Feishu as a native image
+message (Phase 8), and the reply itself lands as an **interactive card**
+that gets PATCHed live as the agent works (Phase 9) — state header,
+growing tool log, and the body text appearing token-by-token. An emoji
+reaction (default `OK`) acks the user's message within ~200 ms before
+the LLM round-trip starts, and the final card carries a "🔄 重新生成"
+button (callbacks require Console enablement; see `.env.example`).
 
 Best for: multi-step agentic tasks the LLM should plan itself — search
 files, write artefacts, shell out to other CLIs, etc.
@@ -178,7 +182,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 6** — Claude Code headless backend (`BACKEND=claude-code`, sandboxed agent loop)
 - [x] **Phase 7** — Streaming output (real-time tool logs) + "⏳ thinking…" placeholder + user-mode systemd hardening
 - [x] **Phase 8** — Image replies for `BACKEND=claude-code` (sandbox-local PNGs auto-uploaded as Feishu image messages)
-- [ ] **Phase 9** — Rate-limit + user allow-list, vision input, real-time card UI, Docker image, npm publish, `v0.1.0` release
+- [x] **Phase 9** — Real streaming via interactive card PATCH + emoji ack on receive + "🔄 重新生成" card-action button (callback support gated on `ENABLE_CARD_CALLBACK` + console enablement)
+- [ ] **Phase 10** — Rate-limit + user allow-list, vision input, Docker image, npm publish, `v0.1.0` release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

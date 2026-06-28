@@ -145,6 +145,14 @@ interface StreamEvent {
       content?: string | Array<{ type: string; text?: string }>
     }>
   }
+  /** Present when `--include-partial-messages` is enabled. */
+  event?: {
+    type?: string
+    delta?: {
+      type?: string
+      text?: string
+    }
+  }
 }
 
 function runOnce(
@@ -161,6 +169,11 @@ function runOnce(
     '--output-format',
     'stream-json',
     '--verbose',
+    // Emit per-token text_delta events too, so callers can render true
+    // streaming UI (interactive card patching). Without this flag, only
+    // the once-per-turn `assistant` envelope text is visible — which
+    // means the user sees a long pause then the full reply appears.
+    '--include-partial-messages',
     isFirstTurn ? '--session-id' : '--resume',
     sessionId,
   ]
@@ -214,7 +227,27 @@ function runOnce(
           if (evt.subtype === 'init' && evt.session_id) serverSessionId = evt.session_id
           break
 
+        case 'stream_event': {
+          // Token-level text deltas from --include-partial-messages.
+          // Tool-use deltas exist too but are noisy and the full tool_use
+          // payload arrives in the subsequent `assistant` envelope; only
+          // forward text deltas here.
+          const ev = evt.event
+          if (
+            ev?.type === 'content_block_delta' &&
+            ev.delta?.type === 'text_delta' &&
+            typeof ev.delta.text === 'string' &&
+            ev.delta.text.length > 0
+          ) {
+            onProgress?.({ kind: 'text', text: ev.delta.text })
+          }
+          break
+        }
+
         case 'assistant':
+          // With partial-messages enabled, text already arrived as deltas
+          // — skip text blocks here to avoid double-counting. Tool-use
+          // blocks still arrive only in the assistant envelope.
           for (const block of evt.message?.content ?? []) {
             if (block.type === 'tool_use' && block.name && block.id) {
               toolCalls++
@@ -226,8 +259,6 @@ function runOnce(
                 brief,
                 toolUseId: block.id,
               })
-            } else if (block.type === 'text' && block.text) {
-              onProgress?.({ kind: 'text', text: block.text })
             }
           }
           break

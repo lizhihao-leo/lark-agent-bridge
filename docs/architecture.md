@@ -100,14 +100,16 @@ needs).
                                           │
                                           ▼
                                   stdout: NDJSON stream
-                                  - system/init  → session info
-                                  - assistant    → tool_use / text blocks
-                                  - user         → tool_result blocks
-                                  - result       → final reply + cost
+                                  - system/init      → session info
+                                  - stream_event     → token deltas (--include-partial-messages)
+                                  - assistant        → tool_use blocks
+                                  - user             → tool_result blocks
+                                  - result           → final reply + cost
                                           │
-                              worker.ts streams progress → logs
+                              worker.ts streams progress → logs + card PATCH
                               worker.ts parses final result → reply to Feishu
-                                  ├─ text reply (markdown if formatting found)
+                                  ├─ emoji ack on the user's message (Phase 9)
+                                  ├─ interactive card PATCH live (Phase 9)
                                   └─ image replies for sandbox-local PNGs (Phase 8)
 ```
 
@@ -141,6 +143,45 @@ caption in the text reply, then sends each image as a separate Feishu
 image message via `lark-cli im +messages-reply --image <relpath>` with
 `cwd` set to the sandbox dir. URL refs (`https://…`) and pre-uploaded
 keys (`img_…`) pass through to the markdown reply unchanged.
+
+### Streaming card (Phase 9)
+
+`STREAMING_CARD=true` (default for `claude-code`) replaces the text
+reply with an **interactive card** that gets PATCHed live as the agent
+runs. The card carries four regions: state-coloured header
+(thinking → running → done/error), tool-call log (one line per
+`tool_use`, oldest first, capped at 12 with overflow note), body text
+(updated from `text_delta` events from `--include-partial-messages` so
+the reply truly appears token-by-token), and a footer note with
+duration / cost / a "🔄 重新生成" action button.
+
+Card patches go through `CardPatcher` — a debouncing wrapper around
+`lark-cli api PATCH /open-apis/im/v1/messages/<id>` that emits at most
+one update every `STREAMING_CARD_MIN_INTERVAL_MS` (1200 ms by default)
+while collapsing intermediate states, with a guaranteed final flush.
+On send failure the bridge falls back to the legacy text path (Phase 7
+"⏳ 思考中…" placeholder + Phase 8 image replies) so users always see
+*something*.
+
+Every accepted message also gets an immediate emoji reaction
+(`ACK_EMOJI`, default `OK`) so the user has a "received" signal within
+~200 ms — much faster than even the initial card. The reaction call is
+fire-and-forget; reaction failures never block the LLM round-trip.
+
+### Card actions (Phase 9)
+
+When `ENABLE_CARD_CALLBACK=true` the bridge starts a second long-poll
+consumer for `card.action.trigger` events alongside the existing
+`im.message.receive_v1` consumer. The Feishu Developer Console for the
+app must have "Callback Configuration" (应用 → 事件与回调 → 回调配置)
+enabled for these events to actually fire; without that the consumer
+runs cleanly but receives no events.
+
+Currently one action is supported: `regenerate` — re-runs the most
+recent user turn for that chat as a synthesised `im.message.receive_v1`
+event (with a "请重新回答上一个问题" prefix to nudge the model toward a
+different angle). Adding more actions is mechanical — handle them in
+`onCardAction()` in `src/worker.ts`.
 
 ### Session continuity
 

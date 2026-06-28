@@ -8,7 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Image replies for `BACKEND=claude-code`**: when Claude Code produces `![alt](path)` markdown referencing files inside the sandbox, the bridge now extracts each local-file ref and sends it as a separate Feishu **image message** via `lark-cli im +messages-reply --image <relpath>` (cwd=sandbox). lark-cli handles the upload-then-send flow so we never have to talk to the OpenAPI directly. URLs (`http(s)://`) and pre-uploaded keys (`img_…`) pass through to the markdown reply unchanged (lark-cli's `--markdown` mode auto-resolves URLs). Refs that escape the sandbox, contain `..`, or point at missing files are kept in the text reply with a logged warning rather than dropped silently.
+- **True streaming via interactive card PATCH** (`STREAMING_CARD=true`, default for `BACKEND=claude-code`). The reply now lands as a Feishu interactive card carrying four regions — state-coloured header (thinking → running → done/error), tool-call log (grows one line per `tool_use`), body text (appearing token-by-token from `text_delta` events) and a duration/cost footer — and the bridge PATCHes that card live as the agent loop streams events. Replaces the Phase 7 "⏳ 思考中…" text placeholder; the placeholder remains as a fallback when `STREAMING_CARD=false` or when the card-send fails.
+- **Token-level text streaming**: `src/llm-claude-code.ts` now spawns Claude Code with `--include-partial-messages` so each `text_delta` from the Anthropic stream arrives as its own progress event. The card body fills in chunk-by-chunk over the lifetime of the turn instead of appearing all at once at the end.
+- **Emoji ack on receive** (`ACK_EMOJI=OK` by default). The bridge fires `lark-cli im reactions create --emoji_type <X>` on the user's message the moment it's accepted, giving a visible "received" signal within ~200 ms — well before the much longer LLM round-trip starts. Fire-and-forget; reaction failures never block.
+- **Card-action callbacks** (`ENABLE_CARD_CALLBACK=true` to opt in). When enabled, the bridge starts a second long-poll consumer for `card.action.trigger` events alongside the message consumer. Currently one action is supported: the **🔄 重新生成** button on every completed card re-runs the most recent user turn (with a "请重新回答上一个问题（用不同角度）" prefix to nudge the model). Requires Feishu Developer Console "Callback Configuration" to be enabled for the app; without that the consumer runs cleanly but receives no events.
+- New files:
+  - `src/lark/reactions.ts` — `react(messageId, emojiType)` wrapping `lark-cli im reactions create`.
+  - `src/lark/card.ts` — `buildCard({ phase, tools, body, durationSec, costUsd, showActions })` that produces the four-region card JSON, with capped tool/body sizes to stay under Feishu's content limits.
+  - `src/lark/card-send.ts` — `sendCardReply()` + `patchCard()` + `CardPatcher` (debouncing throttle, ≥ `STREAMING_CARD_MIN_INTERVAL_MS` between patches with a guaranteed final flush).
+  - `src/lark/card-action-consume.ts` — `card.action.trigger` consumer, auto-restarts on subprocess exit, normalises `action_value` JSON into a typed event.
+- New envs (all live in `.env.example`): `STREAMING_CARD`, `STREAMING_CARD_MIN_INTERVAL_MS`, `ACK_EMOJI`, `ENABLE_CARD_CALLBACK`. `SHOW_THINKING_PLACEHOLDER` now only takes effect when `STREAMING_CARD=false`.
+
+### Changed
+- `src/worker.ts` split into a streaming-card path (`tryStreamingCard`) and a legacy text path (`handleClaudeCode` fallback) so the two reply UIs share zero state. The previous monolithic `handle()` claude-code branch is gone.
+- `src/llm-claude-code.ts` no longer emits `text` progress events from `assistant` envelopes (those would double-count with `text_delta` events). Tool-use progress still comes from `assistant`.
+
+### Verified
+- End-to-end on real Feishu, three scenarios: (1) short reply, no tools — card flips thinking → done in ~9 s; (2) tool-using reply — card shows ✓ Bash tool entry growing into a final reply with regenerate button; (3) long-form reply (24 s, ~3000 chars) — body visibly fills in over the run via `text_delta` patches.
+- Emoji reaction confirmed on the user's message (`lark-cli im reactions list` returns the bot's `OK` reaction).
+- `npm run lint` / `typecheck` / `build` clean.
+
+## [Phase 8] — inline image replies for claude-code backend
+
+### Added
+- **Image replies for `BACKEND=claude-code`**: when Claude Code produces `![alt](path)` markdown referencing files inside the sandbox, the bridge now extracts each local-file ref and sends it as a separate Feishu **image message** via `lark-cli im +messages-reply --image <relpath>` (cwd=sandbox). lark-cli handles the upload-then-send flow so we never have to talk to the OpenAPI directly. URLs (`http(s)://`) and pre-uploaded keys (`img_…`) pass through to the markdown reply unchanged. Refs that escape the sandbox, contain `..`, or point at missing files are kept in the text reply with a logged warning rather than dropped silently.
 - `src/lark/images.ts`: pure-function `extractLocalImages(body, sandboxDir)` returning `{ images, skipped, stripped }`. The `stripped` text replaces each surfaced ref with `[图片: <alt>]` (or `[图片]` if alt is empty) so the text reply still reads coherently.
 - `src/lark/reply.ts`: new `replyImage({ messageId, image, cwd })` helper. Same error-handling contract as `reply()` — logs and resolves `{ ok: false }` rather than throwing.
 
@@ -16,17 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `worker.ts`: when the LLM reply contains **only** local image refs (text body is empty after extraction), the bridge now skips the text reply entirely instead of sending a placeholder string. Empty-and-no-images still gets an explicit `(空回复)` so dropped turns are visible.
 
 ### Fixed
-- Docs / comments aligned to current behaviour:
-  - `README.md`, `README.zh-CN.md`, `docs/architecture.md` — `--output-format` updated from `json` to `stream-json --verbose` (was stale since Phase 7); Phase 8 marked done in both roadmaps; `BACKEND` / `CLAUDE_CODE_SANDBOX` added to the EN config table.
-  - `docs/architecture.md` — failure-mode table rewritten to describe what actually happens now (was full of "Phase N will…" promises that have all shipped); Phase 6 diagram updated; new Phase 7 streaming + Phase 8 image-reply sections.
-  - `docs/deployment.md`, `SECURITY.md` — removed false hardening claim that the unit enables `NoNewPrivileges` / `ProtectSystem` / `PrivateTmp` / `ReadWritePaths` (Phase 7 deliberately removed those when switching to user-mode systemd; they fail with `216/GROUP` there).
-  - `src/lark/consume.ts` — comment said "in-memory dedup set"; dedup has lived in SQLite since Phase 2.
-- Dead code: removed `replyText()` from `src/lark/reply.ts` — Phase 0/1 compat shim with zero callers in the current tree.
-
-### Verified
-- End-to-end on real Feishu: prompted the bot to render a chart, observed (1) a `post` reply with the local-file ref replaced by `[图片: Phase 8 test]`, (2) an `image` reply carrying an `img_v3_…` key uploaded by lark-cli. Round-trip 40 s, $0.135, 4 tool calls.
-- Unit-style sanity check on the extractor with five inputs (cwd-relative path, absolute-in-sandbox path, https URL, `img_…` key, `..` escape attempt, missing file) — only valid sandbox files were extracted; URL and key refs were left untouched; the `..` and missing-file cases were correctly skipped.
-- `npm run lint` / `typecheck` / `build` clean.
+- Doc / comment realignment after Phase 7: `--output-format` updated from `json` to `stream-json --verbose`; deployment & security docs no longer falsely claim the unit enables `NoNewPrivileges`/`ProtectSystem`/`PrivateTmp`/`ReadWritePaths` (Phase 7 removed those when switching to user-mode systemd); `src/lark/consume.ts` comment said "in-memory dedup set" but dedup has been SQLite-backed since Phase 2.
+- Dead code: removed `replyText()` from `src/lark/reply.ts` — Phase 0/1 compat shim with zero callers.
 
 ## [Phase 7] — streaming + thinking placeholder + user-mode systemd
 
