@@ -10,9 +10,33 @@ import { startCardActionConsumer, type CardActionEvent } from './lark/card-actio
 import { chat } from './llm.js'
 import { runClaudeCode, type ClaudeCodeProgress } from './llm-claude-code.js'
 import { Store } from './store.js'
+import { RateLimiter } from './rate-limit.js'
+import { downloadResource } from './lark/download.js'
+import { startMetricsServer, metrics } from './metrics.js'
 import type { FeishuMessageEvent } from './lark/types.js'
 
 const store = new Store(config.STORE_PATH)
+
+const allowedUsers = parseList(config.ALLOWED_USERS)
+const allowedChats = parseList(config.ALLOWED_CHATS)
+const rateLimiter = new RateLimiter(config.RATE_PER_USER_PER_MIN)
+
+function parseList(s: string): Set<string> {
+  return new Set(
+    s
+      .split(',')
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0),
+  )
+}
+
+/**
+ * In-flight Claude Code runs keyed by *card message id*. The card-action
+ * consumer looks up the AbortController here when a "⏹ 停止" button is
+ * clicked, so the streaming-card path can register itself before
+ * spawning and clean up when the subprocess exits.
+ */
+const inflight = new Map<string, AbortController>()
 
 function prune(): void {
   const removed = store.pruneSeenEvents(config.SEEN_EVENT_TTL_DAYS * 24 * 3600 * 1000)
@@ -59,12 +83,58 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   const isGroup = evt.chat_type === 'group'
   const rawContent = String(evt.content ?? '')
 
-  // Non-text payloads: politely tell the user we don't speak that yet.
-  if (evt.message_type !== 'text') {
+  // Allow-lists (per-user + per-chat). Both are AND-combined when set.
+  // We check before the group-mention filter so denied users get an
+  // explicit logged reason — but we don't reply to them: a silent drop
+  // is the right behaviour for spam / unauthorised users (replying
+  // would help an attacker confirm the bot is alive).
+  if (allowedUsers.size > 0 && !allowedUsers.has(evt.sender_id)) {
+    logger.warn(
+      { sender: evt.sender_id, chat: evt.chat_id, preview: rawContent.slice(0, 40) },
+      'sender not in ALLOWED_USERS, dropped',
+    )
+    metrics.messagesDropped.inc({ reason: 'allowlist' })
+    return
+  }
+  if (allowedChats.size > 0 && !allowedChats.has(evt.chat_id)) {
+    logger.warn(
+      { chat: evt.chat_id, sender: evt.sender_id },
+      'chat not in ALLOWED_CHATS, dropped',
+    )
+    metrics.messagesDropped.inc({ reason: 'allowlist' })
+    return
+  }
+
+  // Image messages → vision input for the claude-code backend. We
+  // download the image to <sandbox>/in/<message_id>.<ext> and synthesise
+  // a text prompt that points the agent at it via Read. Other non-text
+  // types are still politely refused.
+  if (evt.message_type === 'image') {
     if (isGroup && !shouldHandleGroup(rawContent)) return
+    if (config.BACKEND !== 'claude-code') {
+      await reply({
+        messageId: evt.message_id,
+        body: '(图片输入仅在 `BACKEND=claude-code` 后端下支持)',
+        format: 'markdown',
+      })
+      return
+    }
+    if (!(await admitAndAck(evt))) return
+    await handleImageMessage(evt, rawContent)
+    return
+  }
+
+  // Non-text payloads (audio / file / sticker / post …): politely tell
+  // the user we don't speak that yet.
+  if (evt.message_type !== 'text') {
+    if (isGroup && !shouldHandleGroup(rawContent)) {
+      metrics.messagesDropped.inc({ reason: 'group_filter' })
+      return
+    }
+    metrics.messagesDropped.inc({ reason: 'unsupported_type' })
     await reply({
       messageId: evt.message_id,
-      body: `(暂不支持 \`${evt.message_type}\` 类型消息,当前版本只处理文本。)`,
+      body: `(暂不支持 \`${evt.message_type}\` 类型消息,当前版本支持文本和图片。)`,
       format: 'markdown',
     })
     return
@@ -73,6 +143,7 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   // Group filter.
   if (isGroup && !shouldHandleGroup(rawContent)) {
     logger.debug({ chat: evt.chat_id, preview: rawContent.slice(0, 40) }, 'group msg ignored')
+    metrics.messagesDropped.inc({ reason: 'group_filter' })
     return
   }
 
@@ -86,6 +157,8 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   )
   if (!userText.trim()) return
 
+  if (!(await admitAndAck(evt))) return
+
   logger.info(
     {
       chat: evt.chat_id,
@@ -96,14 +169,8 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     'incoming message',
   )
 
-  // Emoji ack: visible signal of "received" within ~200 ms, before the
-  // LLM round-trip starts. Best-effort and fire-and-forget — we don't
-  // want a reaction-API hiccup to delay the actual processing.
-  if (config.ACK_EMOJI) {
-    void react(evt.message_id, config.ACK_EMOJI)
-  }
-
   store.appendMessage(evt.chat_id, 'user', userText)
+  metrics.messagesTotal.inc({ type: 'text', backend: config.BACKEND })
 
   if (config.BACKEND === 'claude-code') {
     await handleClaudeCode(evt, userText)
@@ -115,19 +182,104 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   let body: string
   let format: 'text' | 'markdown' = 'text'
   const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
+  const sdkStart = Date.now()
   try {
     const result = await chat(history)
     body = result.text
+    metrics.llmCalls.inc({ backend: 'anthropic-sdk', outcome: 'success' })
+    metrics.llmLatencySec.observe({ backend: 'anthropic-sdk' }, (Date.now() - sdkStart) / 1000)
+    metrics.llmToolCalls.inc({ backend: 'anthropic-sdk' }, result.toolCalls)
   } catch (err) {
     const e = err as { status?: number; message?: string }
     logger.error({ status: e.status, msg: e.message }, 'LLM call failed')
     body = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
+    metrics.llmCalls.inc({ backend: 'anthropic-sdk', outcome: 'error' })
   }
 
   if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
 
   store.appendMessage(evt.chat_id, 'assistant', body)
   await reply({ messageId: evt.message_id, body, format })
+}
+
+/**
+ * Shared admission gate used by both text and image branches: applies
+ * the per-user rate limit and fires the ack-emoji on success. Returns
+ * `true` when the message should proceed to handling, `false` when it
+ * was throttled (a textual signal + ⏰ emoji have already been sent).
+ */
+async function admitAndAck(evt: FeishuMessageEvent): Promise<boolean> {
+  const limit = rateLimiter.tryConsume(evt.sender_id)
+  if (!limit.ok) {
+    const wait = Math.ceil(limit.retryAfterSec ?? 10)
+    logger.warn({ sender: evt.sender_id, retryAfterSec: wait }, 'rate-limited')
+    metrics.messagesDropped.inc({ reason: 'rate_limited' })
+    void react(evt.message_id, 'CLOCK')
+    await reply({
+      messageId: evt.message_id,
+      body: `⏰ 请求过于频繁,请约 ${wait} 秒后再试(每用户每分钟 ${config.RATE_PER_USER_PER_MIN} 条)。`,
+      format: 'text',
+    })
+    return false
+  }
+  if (config.ACK_EMOJI) void react(evt.message_id, config.ACK_EMOJI)
+  return true
+}
+
+/**
+ * Vision-input flow: download the image into the sandbox, synthesise a
+ * user-text prompt pointing the agent at the file, and dispatch through
+ * the regular claude-code pipeline.
+ */
+async function handleImageMessage(evt: FeishuMessageEvent, rawContent: string): Promise<void> {
+  // Extract `img_…` key from the content string. lark-cli normalises
+  // image messages to `[Image: img_v3_…]`, but we accept anywhere in
+  // the string to be future-proof.
+  const m = rawContent.match(/img_[A-Za-z0-9_-]+/)
+  if (!m) {
+    logger.warn(
+      { chat: evt.chat_id, preview: rawContent.slice(0, 80) },
+      'image message: no img_ key found in content',
+    )
+    await reply({
+      messageId: evt.message_id,
+      body: '(无法从消息中提取 image_key,请重试)',
+      format: 'text',
+    })
+    return
+  }
+  const fileKey = m[0]
+  // Use the original message_id as a stable, dedup-friendly filename.
+  // lark-cli infers the extension from Content-Type when ours has none.
+  const relPath = `in/${evt.message_id}`
+  const dl = await downloadResource({
+    messageId: evt.message_id,
+    fileKey,
+    type: 'image',
+    output: relPath,
+    cwd: config.CLAUDE_CODE_SANDBOX,
+    as: 'bot',
+  })
+  if (!dl.ok) {
+    await reply({
+      messageId: evt.message_id,
+      body: '(图片下载失败,请稍后再试)',
+      format: 'text',
+    })
+    return
+  }
+  const finalPath = dl.output ?? relPath
+  logger.info(
+    { chat: evt.chat_id, fileKey, path: finalPath },
+    'image downloaded for vision input',
+  )
+
+  // Synthesise the user turn. Claude Code's Read tool can open images,
+  // so the agent self-services from a textual pointer.
+  const synthText = `用户发来了一张图片，已保存到沙箱内的 \`${finalPath}\`。请用 Read 工具查看图片，然后根据图片内容回应用户（如果用户没附文字，就描述图片或回答可能的问题）。`
+  store.appendMessage(evt.chat_id, 'user', synthText)
+  metrics.messagesTotal.inc({ type: 'image', backend: config.BACKEND })
+  await handleClaudeCode(evt, synthText)
 }
 
 /**
@@ -162,6 +314,15 @@ async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Prom
   try {
     const result = await runClaudeCode(evt.chat_id, userText, (p) => logProgress(evt.chat_id, p))
     body = result.text
+    metrics.llmToolCalls.inc({ backend: 'claude-code' }, result.toolCalls)
+    metrics.llmLatencySec.observe({ backend: 'claude-code' }, result.durationSec)
+    if (result.costUsd !== undefined) {
+      metrics.llmCostUsd.inc({ backend: 'claude-code' }, result.costUsd)
+    }
+    metrics.llmCalls.inc({
+      backend: 'claude-code',
+      outcome: result.stopReason === 'error' ? 'error' : 'success',
+    })
     logger.info(
       {
         chat: evt.chat_id,
@@ -177,6 +338,7 @@ async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Prom
     const e = err as { message?: string }
     logger.error({ err: e.message }, 'claude-code threw')
     body = `(Claude Code 失败: ${e.message ?? String(err)})`
+    metrics.llmCalls.inc({ backend: 'claude-code', outcome: 'error' })
   }
 
   let format: 'text' | 'markdown' = 'text'
@@ -224,17 +386,21 @@ async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Prom
  * couldn't even be sent (so the caller can fall back to the text path).
  */
 async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Promise<boolean> {
-  // 1. Send the initial "thinking" card.
+  // 1. Send the initial "thinking" card, with the stop button already
+  //    showing so the user can bail out before the first tool fires.
   const initialCard = buildCard({
     phase: 'thinking',
     tools: [],
     body: '',
     showActions: false,
+    showStop: true,
   })
   const sendResult = await sendCardReply(evt.message_id, initialCard)
   if (!sendResult.ok || !sendResult.messageId) return false
   const cardMsgId = sendResult.messageId
   const patcher = new CardPatcher(cardMsgId, config.STREAMING_CARD_MIN_INTERVAL_MS)
+  const abort = new AbortController()
+  inflight.set(cardMsgId, abort)
 
   // 2. Run Claude Code, queue card updates from each progress event.
   const tools: ToolEntry[] = []
@@ -242,14 +408,15 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
   let partialBody = ''
   const startedAt = Date.now()
 
-  const snapshot = (phase: CardPhase, opts: { final?: boolean; costUsd?: number } = {}) =>
+  const snapshot = (phase: CardPhase, opts: { costUsd?: number } = {}) =>
     buildCard({
       phase,
       tools,
       body: partialBody,
       durationSec: (Date.now() - startedAt) / 1000,
       ...(opts.costUsd !== undefined ? { costUsd: opts.costUsd } : {}),
-      showActions: phase === 'done' || phase === 'error',
+      showActions: phase === 'done' || phase === 'error' || phase === 'aborted',
+      showStop: phase === 'thinking' || phase === 'running',
     })
 
   const onProgress = (p: ClaudeCodeProgress): void => {
@@ -279,10 +446,15 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
   let costUsd: number | undefined
   let stopReason: string | undefined
   try {
-    const result = await runClaudeCode(evt.chat_id, userText, onProgress)
+    const result = await runClaudeCode(evt.chat_id, userText, onProgress, abort.signal)
     body = result.text
     costUsd = result.costUsd
     stopReason = result.stopReason
+    metrics.llmToolCalls.inc({ backend: 'claude-code' }, result.toolCalls)
+    metrics.llmLatencySec.observe({ backend: 'claude-code' }, result.durationSec)
+    if (result.costUsd !== undefined) {
+      metrics.llmCostUsd.inc({ backend: 'claude-code' }, result.costUsd)
+    }
     logger.info(
       {
         chat: evt.chat_id,
@@ -299,7 +471,13 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
     logger.error({ err: e.message }, 'claude-code threw')
     body = `(Claude Code 失败: ${e.message ?? String(err)})`
     stopReason = 'error'
+  } finally {
+    inflight.delete(cardMsgId)
   }
+
+  const outcome =
+    stopReason === 'aborted' ? 'aborted' : stopReason === 'error' ? 'error' : 'success'
+  metrics.llmCalls.inc({ backend: 'claude-code', outcome })
 
   store.appendMessage(evt.chat_id, 'assistant', body)
 
@@ -317,7 +495,8 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
   }
   partialBody = stripped || body
 
-  const finalPhase: CardPhase = stopReason === 'error' ? 'error' : 'done'
+  const finalPhase: CardPhase =
+    stopReason === 'aborted' ? 'aborted' : stopReason === 'error' ? 'error' : 'done'
   await patcher.flush(snapshot(finalPhase, costUsd !== undefined ? { costUsd } : {}))
 
   // 4. Image replies still go as separate messages (Phase 8 unchanged).
@@ -364,6 +543,10 @@ export function run(): { stop: () => Promise<void> } {
       streamingCard: config.BACKEND === 'claude-code' ? config.STREAMING_CARD : undefined,
       cardCallback: config.ENABLE_CARD_CALLBACK,
       ackEmoji: config.ACK_EMOJI || null,
+      ratePerUserPerMin: config.RATE_PER_USER_PER_MIN || null,
+      allowedUsers: allowedUsers.size || null,
+      allowedChats: allowedChats.size || null,
+      metricsPort: config.METRICS_PORT || null,
       sandbox: config.BACKEND === 'claude-code' ? config.CLAUDE_CODE_SANDBOX : undefined,
     },
     'bridge starting',
@@ -392,22 +575,33 @@ export function run(): { stop: () => Promise<void> } {
     stopCardConsumer = h.stop
   }
 
+  // Optional Prometheus /metrics endpoint, bound to localhost.
+  let stopMetrics: (() => Promise<void>) | undefined
+  if (config.METRICS_PORT > 0) {
+    const { stop } = startMetricsServer(config.METRICS_PORT)
+    stopMetrics = stop
+  }
+
   return {
     stop: async () => {
       clearInterval(pruneTimer)
       await stopMsgConsumer()
       if (stopCardConsumer) await stopCardConsumer()
+      if (stopMetrics) await stopMetrics()
       store.close()
     },
   }
 }
 
 /**
- * Handle a card button click. Currently:
- *   - `regenerate` → re-run the last user message in this chat as a new
- *     LLM turn (synthesise a fresh FeishuMessageEvent and pass it to
- *     `handle()`). Bypasses the group-mention filter — the user already
- *     opted in by clicking the button.
+ * Handle a card button click. Supported actions:
+ *   - `stop`       → abort the in-flight claude-code subprocess for that
+ *                    card (if any); the running tryStreamingCard()
+ *                    promise will resolve with `stopReason: 'aborted'`
+ *                    and patch the card to the "已停止" state.
+ *   - `regenerate` → re-run the last user message in this chat as a
+ *                    new LLM turn. Bypasses the group-mention filter
+ *                    (the operator already opted in by clicking).
  */
 async function onCardAction(action: CardActionEvent): Promise<void> {
   const name = String(action.actionValue['action'] ?? '')
@@ -421,6 +615,18 @@ async function onCardAction(action: CardActionEvent): Promise<void> {
     },
     'card action received',
   )
+  metrics.cardActions.inc({ action: name || 'unknown' })
+
+  if (name === 'stop') {
+    const ctrl = inflight.get(action.messageId)
+    if (!ctrl) {
+      logger.info({ msg: action.messageId }, 'stop: no in-flight run for this card')
+      return
+    }
+    ctrl.abort()
+    return
+  }
+
   if (name !== 'regenerate') {
     logger.debug({ name }, 'card action ignored (unknown name)')
     return

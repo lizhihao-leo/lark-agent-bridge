@@ -17,7 +17,7 @@
  * are formatted to be readable on a phone screen.
  */
 
-export type CardPhase = 'thinking' | 'running' | 'done' | 'error'
+export type CardPhase = 'thinking' | 'running' | 'done' | 'error' | 'aborted'
 
 export interface ToolEntry {
   tool: string
@@ -35,8 +35,10 @@ export interface CardOptions {
   durationSec?: number
   /** Cost in USD (only meaningful at `done`). */
   costUsd?: number
-  /** Whether to render the "regenerate" button. Usually only on `done`/`error`. */
+  /** Whether to render the regenerate button (usually `done` / `error`). */
   showActions: boolean
+  /** Whether to render the stop button (usually `thinking` / `running`). */
+  showStop?: boolean
 }
 
 const MAX_TOOLS_DISPLAYED = 12
@@ -71,6 +73,11 @@ function header(phase: CardPhase): Record<string, unknown> {
         title: { tag: 'plain_text', content: '⚠️ 出错' },
         template: 'red',
       }
+    case 'aborted':
+      return {
+        title: { tag: 'plain_text', content: '⏹ 已停止' },
+        template: 'grey',
+      }
   }
 }
 
@@ -95,7 +102,7 @@ function bodyBlock(body: string, phase: CardPhase): Record<string, unknown> | nu
     if (phase === 'thinking' || phase === 'running') return null
     return {
       tag: 'div',
-      text: { tag: 'lark_md', content: '_（无输出）_' },
+      text: { tag: 'lark_md', content: phase === 'aborted' ? '_（用户已停止）_' : '_（无输出）_' },
     }
   }
   const truncated = body.length > MAX_BODY_CHARS
@@ -120,18 +127,26 @@ function footerNote(opts: CardOptions): Record<string, unknown> | null {
   }
 }
 
-function actionBlock(): Record<string, unknown> {
-  return {
-    tag: 'action',
-    actions: [
-      {
-        tag: 'button',
-        text: { tag: 'plain_text', content: '🔄 重新生成' },
-        type: 'default',
-        value: { action: 'regenerate' },
-      },
-    ],
+function actionBlock(opts: CardOptions): Record<string, unknown> | null {
+  const actions: Array<Record<string, unknown>> = []
+  if (opts.showStop) {
+    actions.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: '⏹ 停止' },
+      type: 'danger',
+      value: { action: 'stop' },
+    })
   }
+  if (opts.showActions) {
+    actions.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: '🔄 重新生成' },
+      type: 'default',
+      value: { action: 'regenerate' },
+    })
+  }
+  if (actions.length === 0) return null
+  return { tag: 'action', actions }
 }
 
 /** Render a card JSON object ready to be `JSON.stringify`'d into `content`. */
@@ -150,7 +165,8 @@ export function buildCard(opts: CardOptions): Record<string, unknown> {
   const note = footerNote(opts)
   if (note) elements.push(note)
 
-  if (opts.showActions) elements.push(actionBlock())
+  const actions = actionBlock(opts)
+  if (actions) elements.push(actions)
 
   // At least one element is required for a valid card. Inject a placeholder
   // when in early thinking phase with nothing to show yet.

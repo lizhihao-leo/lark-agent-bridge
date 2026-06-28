@@ -96,12 +96,14 @@ export interface ClaudeCodeResult {
 /**
  * Run a one-shot `claude -p` for this chat, resuming the session if known.
  * `onProgress` is called for every streamed event — useful for showing
- * real-time activity in the chat UI.
+ * real-time activity in the chat UI. Pass `abortSignal` to allow callers
+ * to kill the subprocess mid-flight (e.g. a "⏹ 停止" card button).
  */
 export function runClaudeCode(
   chatId: string,
   userText: string,
   onProgress?: (p: ClaudeCodeProgress) => void,
+  abortSignal?: AbortSignal,
 ): Promise<ClaudeCodeResult> {
   const sessions = loadSessions()
   let sessionId = sessions[chatId]
@@ -112,7 +114,7 @@ export function runClaudeCode(
     saveSessions(sessions)
   }
 
-  return runOnce(chatId, userText, sessionId, isFirstTurn, onProgress).then(async (result) => {
+  return runOnce(chatId, userText, sessionId, isFirstTurn, onProgress, abortSignal).then(async (result) => {
     if (
       isFirstTurn &&
       result.stopReason === 'error' &&
@@ -120,7 +122,7 @@ export function runClaudeCode(
     ) {
       logger.info({ chatId }, 'session existed server-side, retrying with --resume')
       isFirstTurn = false
-      return runOnce(chatId, userText, sessionId, false, onProgress)
+      return runOnce(chatId, userText, sessionId, false, onProgress, abortSignal)
     }
     return result
   })
@@ -161,6 +163,7 @@ function runOnce(
   sessionId: string,
   isFirstTurn: boolean,
   onProgress?: (p: ClaudeCodeProgress) => void,
+  abortSignal?: AbortSignal,
 ): Promise<ClaudeCodeResult> {
   const argv: string[] = [
     '-p',
@@ -199,6 +202,21 @@ function runOnce(
         FORCE_COLOR: '0',
       },
     })
+
+    let aborted = false
+    const onAbort = (): void => {
+      aborted = true
+      logger.info({ chatId, pid: child.pid }, 'claude-code aborted by caller')
+      child.kill('SIGTERM')
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGKILL')
+      }, 1500).unref()
+    }
+    if (abortSignal?.aborted) {
+      onAbort()
+    } else {
+      abortSignal?.addEventListener('abort', onAbort, { once: true })
+    }
 
     let stderr = ''
     child.stderr.on('data', (d) => (stderr += d.toString('utf8')))
@@ -296,6 +314,21 @@ function runOnce(
       clearTimeout(killer)
       rl.close()
       const durationSec = (Date.now() - startedAt) / 1000
+
+      if (aborted) {
+        // Caller asked us to stop; surface as an explicit stop_reason so
+        // the worker can render the card as "aborted" rather than as
+        // an error.
+        resolve({
+          text: '(已由用户停止)',
+          sessionId,
+          costUsd: undefined,
+          durationSec,
+          stopReason: 'aborted',
+          toolCalls,
+        })
+        return
+      }
 
       if (code !== 0) {
         logger.error(

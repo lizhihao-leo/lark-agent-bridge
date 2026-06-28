@@ -183,7 +183,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 7** — Streaming output (real-time tool logs) + "⏳ thinking…" placeholder + user-mode systemd hardening
 - [x] **Phase 8** — Image replies for `BACKEND=claude-code` (sandbox-local PNGs auto-uploaded as Feishu image messages)
 - [x] **Phase 9** — Real streaming via interactive card PATCH + emoji ack on receive + "🔄 重新生成" card-action button (callback support gated on `ENABLE_CARD_CALLBACK` + console enablement)
-- [ ] **Phase 10** — Rate-limit + user allow-list, vision input, Docker image, npm publish, `v0.1.0` release
+- [x] **Phase 10** — Production hardening: per-user rate limit + user/chat allow-lists, vision input (image messages → sandbox `in/`), "⏹ 停止" card button to abort in-flight runs, Prometheus `/metrics` endpoint
+- [ ] **Phase 11** — Docker image, npm publish, `v0.1.0` release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

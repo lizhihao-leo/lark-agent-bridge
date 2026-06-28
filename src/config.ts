@@ -70,6 +70,32 @@ const Env = z.object({
   CLAUDE_CODE_EXTRA_ARGS: z.string().default(''),
 
   /**
+   * Comma-separated allow-list of `open_id` values that may talk to the
+   * bot. Empty (default) = no allow-list, anyone the bot can see is
+   * allowed. P2P scope on the Feishu side already restricts who can DM
+   * the bot, but groups containing the bot are also reachable — this
+   * env adds a per-user gate on top.
+   */
+  ALLOWED_USERS: z.string().default(''),
+
+  /**
+   * Comma-separated allow-list of `chat_id` values. Same semantics as
+   * `ALLOWED_USERS` but for the chat (group / P2P chat_id). Combined as
+   * AND with ALLOWED_USERS — if both are set, the message must pass
+   * both gates.
+   */
+  ALLOWED_CHATS: z.string().default(''),
+
+  /**
+   * Per-user rate limit: token-bucket capacity over a 60 s window. The
+   * bucket refills smoothly (capacity / 60 tokens per second), so a
+   * burst of N messages within a few seconds is fine if the user has
+   * been idle; sustained traffic is capped at `capacity` per minute.
+   * Set to 0 to disable rate limiting (not recommended).
+   */
+  RATE_PER_USER_PER_MIN: z.coerce.number().int().nonnegative().default(6),
+
+  /**
    * Send an immediate "⏳ 思考中…" placeholder to Feishu while Claude Code
    * is running, then recall it after the real reply lands. Improves UX for
    * the multi-second latency without needing interactive cards. Only
@@ -119,6 +145,13 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+
+  /**
+   * Expose a Prometheus `/metrics` endpoint on this port. Set to `0` to
+   * disable (the bridge binds nothing). Bound to `127.0.0.1` only; put
+   * a reverse proxy in front if you need external scraping.
+   */
+  METRICS_PORT: z.coerce.number().int().nonnegative().default(9090),
 
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 })

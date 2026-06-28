@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { logger } from '../logger.js'
+import { metrics } from '../metrics.js'
 
 /**
  * Send an interactive card as a reply to a Feishu message, and PATCH the
@@ -106,6 +107,7 @@ export function patchCard(
           { code, cardMessageId, stderr: stderr.slice(0, 300) },
           'patchCard failed (best-effort)',
         )
+        metrics.cardPatches.inc({ outcome: 'fail' })
         resolve(false)
         return
       }
@@ -113,16 +115,19 @@ export function patchCard(
         const obj = JSON.parse(stdout) as { ok?: boolean; error?: unknown }
         if (obj.ok === false) {
           logger.warn({ cardMessageId, error: obj.error }, 'patchCard returned ok:false')
+          metrics.cardPatches.inc({ outcome: 'fail' })
           resolve(false)
           return
         }
       } catch {
         // fall through
       }
+      metrics.cardPatches.inc({ outcome: 'ok' })
       resolve(true)
     })
     child.on('error', (err) => {
       logger.warn({ err: err.message }, 'spawn lark-cli (patchCard) failed')
+      metrics.cardPatches.inc({ outcome: 'fail' })
       resolve(false)
     })
   })
