@@ -1,9 +1,9 @@
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { startConsumer } from './lark/consume.js'
-import { reply } from './lark/reply.js'
+import { reply, recall } from './lark/reply.js'
 import { chat } from './llm.js'
-import { runClaudeCode } from './llm-claude-code.js'
+import { runClaudeCode, type ClaudeCodeProgress } from './llm-claude-code.js'
 import { Store } from './store.js'
 import type { FeishuMessageEvent } from './lark/types.js'
 
@@ -97,10 +97,45 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   let format: 'text' | 'markdown' = 'text'
 
   if (config.BACKEND === 'claude-code') {
+    // Send an immediate placeholder so the user sees activity within a
+    // second. We'll recall it after the final reply lands (best-effort).
+    let placeholderId: string | undefined
+    if (config.SHOW_THINKING_PLACEHOLDER) {
+      const r = await reply({
+        messageId: evt.message_id,
+        body: '⏳ 思考中…',
+        format: 'text',
+      })
+      placeholderId = r.replyMessageId
+    }
+
     // Claude Code manages its own session/history via --resume; we still
-    // record the turn in our SQLite store for audit + dedup.
+    // record the turn in our SQLite store for audit + dedup. Stream progress
+    // events to the logger so operators can see tool calls in real time.
     try {
-      const result = await runClaudeCode(evt.chat_id, userText)
+      const onProgress = (p: ClaudeCodeProgress): void => {
+        switch (p.kind) {
+          case 'tool_use':
+            logger.info(
+              { chat: evt.chat_id, tool: p.tool, brief: p.brief.slice(0, 80) },
+              'claude-code tool_use',
+            )
+            break
+          case 'tool_result':
+            logger.debug(
+              { chat: evt.chat_id, tool: p.tool, ok: p.ok, len: p.preview.length },
+              'claude-code tool_result',
+            )
+            break
+          case 'text':
+            logger.debug(
+              { chat: evt.chat_id, preview: p.text.slice(0, 80) },
+              'claude-code partial text',
+            )
+            break
+        }
+      }
+      const result = await runClaudeCode(evt.chat_id, userText, onProgress)
       body = result.text
       logger.info(
         {
@@ -109,6 +144,7 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
           cost: result.costUsd,
           stop: result.stopReason,
           session: result.sessionId.slice(0, 8),
+          toolCalls: result.toolCalls,
         },
         'claude-code done',
       )
@@ -117,21 +153,35 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
       logger.error({ err: e.message }, 'claude-code threw')
       body = `(Claude Code 失败: ${e.message ?? String(err)})`
     }
-  } else {
-    // Default backend: one Anthropic-SDK HTTP call with our SQLite-backed
-    // history. Tools (if ENABLE_TOOLS=true) loop inside `chat()`.
-    const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
-    try {
-      const result = await chat(history)
-      body = result.text
-    } catch (err) {
-      const e = err as { status?: number; message?: string }
-      logger.error({ status: e.status, msg: e.message }, 'LLM call failed')
-      body = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
+
+    // Heuristic: if the response looks like markdown, render as markdown.
+    if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
+
+    store.appendMessage(evt.chat_id, 'assistant', body)
+    await reply({ messageId: evt.message_id, body, format })
+
+    // Best-effort recall of the placeholder. Done after the final reply lands
+    // so the user always has something to read.
+    if (placeholderId) {
+      recall(placeholderId).catch((err) =>
+        logger.warn({ err }, 'placeholder recall failed (non-fatal)'),
+      )
     }
+    return
   }
 
-  // Heuristic: if the response looks like markdown, render as markdown.
+  // Default backend: one Anthropic-SDK HTTP call with our SQLite-backed
+  // history. Tools (if ENABLE_TOOLS=true) loop inside `chat()`.
+  const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
+  try {
+    const result = await chat(history)
+    body = result.text
+  } catch (err) {
+    const e = err as { status?: number; message?: string }
+    logger.error({ status: e.status, msg: e.message }, 'LLM call failed')
+    body = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
+  }
+
   if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
 
   store.appendMessage(evt.chat_id, 'assistant', body)

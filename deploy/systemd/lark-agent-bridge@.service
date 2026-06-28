@@ -3,30 +3,29 @@ Description=lark-agent-bridge — Feishu/Lark events ↔ LLM agent bridge
 Documentation=https://github.com/lizhihao-leo/lark-agent-bridge
 After=network-online.target
 Wants=network-online.target
+# 5-minute total restart budget — beyond that, let the unit fall into
+# 'failed' state so the operator notices instead of a silent restart loop.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
-User=%i
 # WorkingDirectory holds the built `dist/`. Adjust if you install elsewhere.
 WorkingDirectory=%h/lark-agent-bridge
 EnvironmentFile=%h/lark-agent-bridge/.env
 ExecStart=/usr/bin/node %h/lark-agent-bridge/dist/index.js
 Restart=on-failure
 RestartSec=3
-# 5-minute total restart budget — beyond that, let the unit fall into
-# 'failed' state so the operator notices instead of a silent restart loop.
-StartLimitIntervalSec=300
-StartLimitBurst=10
-# Give graceful shutdown 10s before SIGKILL (we drain lark-cli children first).
-TimeoutStopSec=10
+# Give graceful shutdown 15s before SIGKILL (drains lark-cli children and
+# any in-flight Claude Code subprocess).
+TimeoutStopSec=15
 KillSignal=SIGTERM
+# Cascade SIGTERM to every child the bridge spawned.
+KillMode=control-group
 
-# Security hardening — only what's safe for this workload. The bridge does
-# need outbound network and the lark-cli config file in $HOME.
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=%h/lark-agent-bridge %h/.lark-cli
+# User-mode services run as the invoking user already, so we deliberately
+# omit User=, NoNewPrivileges, ProtectSystem=strict and ReadWritePaths —
+# those are system-mode features and fail with 216/GROUP under user systemd.
 
 # Structured JSON logs go straight to the journal.
 StandardOutput=journal
@@ -35,3 +34,4 @@ SyslogIdentifier=lark-agent-bridge
 
 [Install]
 WantedBy=default.target
+

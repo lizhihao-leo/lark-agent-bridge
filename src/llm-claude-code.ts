@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import readline from 'node:readline'
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -19,9 +20,15 @@ import { logger } from './logger.js'
  *     and let Claude Code create the session on first run.
  *
  * Output parsing:
- *   - We use `--output-format json` (single JSON object after completion).
- *   - The reply text is the `result` field; we surface stop_reason / cost /
- *     duration in our logs for observability.
+ *   - We use `--output-format stream-json --verbose`, which emits one JSON
+ *     event per line:
+ *       * `system/init`   — startup; tools/cwd/model declared
+ *       * `assistant`     — model output (may be tool_use or text blocks)
+ *       * `user`          — tool_result blocks (synthesised, not real user)
+ *       * `result`        — the final wrap-up with `result.result` = final text
+ *     We forward each event to an optional onProgress callback so the caller
+ *     can show "🛠 running Bash…" in the chat UI in real time. The final
+ *     ClaudeCodeResult is derived from the `result` envelope.
  */
 
 interface SessionMap {
@@ -51,12 +58,7 @@ function saveSessions(map: SessionMap): void {
 
 /** Deterministic UUIDv4-shaped session id from chat_id. */
 function deriveSessionId(chatId: string): string {
-  // Claude Code requires --session-id to look like a UUID
-  // (8-4-4-4-12 hex with the version/variant nibbles in the right place).
-  // We derive a deterministic UUIDv4 from a sha256 of the chat_id so that
-  // even if the session map is wiped, the id stays stable for that chat.
   const h = createHash('sha256').update(`lark-agent-bridge:${chatId}`).digest('hex')
-  // Force version=4 in nibble 12 and variant=8/9/a/b in nibble 16.
   const v4 =
     h.slice(0, 8) +
     '-' +
@@ -72,6 +74,12 @@ function deriveSessionId(chatId: string): string {
   return v4
 }
 
+/** Streaming progress events extracted from `--output-format stream-json`. */
+export type ClaudeCodeProgress =
+  | { kind: 'tool_use'; tool: string; brief: string; toolUseId: string }
+  | { kind: 'tool_result'; toolUseId: string; tool: string; ok: boolean; preview: string }
+  | { kind: 'text'; text: string }
+
 export interface ClaudeCodeResult {
   text: string
   sessionId: string
@@ -81,12 +89,20 @@ export interface ClaudeCodeResult {
   durationSec: number
   /** stop_reason from the json output, if any. */
   stopReason: string | undefined
+  /** Number of tool_use blocks the model emitted. */
+  toolCalls: number
 }
 
 /**
  * Run a one-shot `claude -p` for this chat, resuming the session if known.
+ * `onProgress` is called for every streamed event — useful for showing
+ * real-time activity in the chat UI.
  */
-export function runClaudeCode(chatId: string, userText: string): Promise<ClaudeCodeResult> {
+export function runClaudeCode(
+  chatId: string,
+  userText: string,
+  onProgress?: (p: ClaudeCodeProgress) => void,
+): Promise<ClaudeCodeResult> {
   const sessions = loadSessions()
   let sessionId = sessions[chatId]
   let isFirstTurn = !sessionId
@@ -96,10 +112,7 @@ export function runClaudeCode(chatId: string, userText: string): Promise<ClaudeC
     saveSessions(sessions)
   }
 
-  return runOnce(chatId, userText, sessionId, isFirstTurn).then(async (result) => {
-    // If we tried --session-id but Claude Code says "already in use",
-    // it means the session exists server-side (e.g. our local map was
-    // wiped). Fall back to --resume transparently.
+  return runOnce(chatId, userText, sessionId, isFirstTurn, onProgress).then(async (result) => {
     if (
       isFirstTurn &&
       result.stopReason === 'error' &&
@@ -107,10 +120,31 @@ export function runClaudeCode(chatId: string, userText: string): Promise<ClaudeC
     ) {
       logger.info({ chatId }, 'session existed server-side, retrying with --resume')
       isFirstTurn = false
-      return runOnce(chatId, userText, sessionId, false)
+      return runOnce(chatId, userText, sessionId, false, onProgress)
     }
     return result
   })
+}
+
+interface StreamEvent {
+  type?: string
+  subtype?: string
+  result?: string
+  session_id?: string
+  stop_reason?: string
+  total_cost_usd?: number
+  is_error?: boolean
+  message?: {
+    content?: Array<{
+      type: string
+      text?: string
+      name?: string
+      id?: string
+      input?: Record<string, unknown>
+      tool_use_id?: string
+      content?: string | Array<{ type: string; text?: string }>
+    }>
+  }
 }
 
 function runOnce(
@@ -118,13 +152,15 @@ function runOnce(
   userText: string,
   sessionId: string,
   isFirstTurn: boolean,
+  onProgress?: (p: ClaudeCodeProgress) => void,
 ): Promise<ClaudeCodeResult> {
   const argv: string[] = [
     '-p',
     '--bare',
     '--dangerously-skip-permissions',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     isFirstTurn ? '--session-id' : '--resume',
     sessionId,
   ]
@@ -147,15 +183,77 @@ function runOnce(
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        // Make sure pino-pretty doesn't leak into the subprocess stdout.
         FORCE_COLOR: '0',
       },
     })
 
-    let stdout = ''
     let stderr = ''
-    child.stdout.on('data', (d) => (stdout += d.toString('utf8')))
     child.stderr.on('data', (d) => (stderr += d.toString('utf8')))
+
+    // Parse stream-json line by line. We keep the last `result` event around
+    // (it carries the final reply and cost) and forward intermediate events
+    // to the progress callback.
+    let finalEvent: StreamEvent | undefined
+    let serverSessionId: string | undefined
+    let toolCalls = 0
+    const toolNameById = new Map<string, string>()
+
+    const rl = readline.createInterface({ input: child.stdout })
+    rl.on('line', (line) => {
+      if (!line.trim()) return
+      let evt: StreamEvent
+      try {
+        evt = JSON.parse(line) as StreamEvent
+      } catch {
+        logger.debug({ chatId, line: line.slice(0, 200) }, 'unparseable stream-json line')
+        return
+      }
+
+      switch (evt.type) {
+        case 'system':
+          if (evt.subtype === 'init' && evt.session_id) serverSessionId = evt.session_id
+          break
+
+        case 'assistant':
+          for (const block of evt.message?.content ?? []) {
+            if (block.type === 'tool_use' && block.name && block.id) {
+              toolCalls++
+              toolNameById.set(block.id, block.name)
+              const brief = summariseToolInput(block.name, block.input ?? {})
+              onProgress?.({
+                kind: 'tool_use',
+                tool: block.name,
+                brief,
+                toolUseId: block.id,
+              })
+            } else if (block.type === 'text' && block.text) {
+              onProgress?.({ kind: 'text', text: block.text })
+            }
+          }
+          break
+
+        case 'user':
+          for (const block of evt.message?.content ?? []) {
+            if (block.type === 'tool_result' && block.tool_use_id) {
+              const tool = toolNameById.get(block.tool_use_id) ?? 'tool'
+              const preview = stringifyToolResult(block.content)
+              onProgress?.({
+                kind: 'tool_result',
+                toolUseId: block.tool_use_id,
+                tool,
+                ok: !evt.is_error,
+                preview: preview.slice(0, 200),
+              })
+            }
+          }
+          break
+
+        case 'result':
+          finalEvent = evt
+          if (evt.session_id) serverSessionId = evt.session_id
+          break
+      }
+    })
 
     const killer = setTimeout(() => {
       logger.warn({ chatId, sec: config.CLAUDE_CODE_TIMEOUT_SEC }, 'claude-code timed out')
@@ -165,6 +263,7 @@ function runOnce(
 
     child.on('exit', (code) => {
       clearTimeout(killer)
+      rl.close()
       const durationSec = (Date.now() - startedAt) / 1000
 
       if (code !== 0) {
@@ -178,53 +277,45 @@ function runOnce(
           costUsd: undefined,
           durationSec,
           stopReason: 'error',
+          toolCalls,
         })
         return
       }
 
-      // Parse the JSON output. Claude Code prints exactly one JSON object on
-      // stdout when --output-format=json is used.
-      try {
-        const obj = JSON.parse(stdout) as {
-          result?: string
-          session_id?: string
-          stop_reason?: string
-          total_cost_usd?: number
-          is_error?: boolean
-          subtype?: string
-        }
-        if (obj.is_error) {
-          logger.warn({ obj, chatId }, 'claude-code reported is_error')
-        }
-        // Claude Code may rename our session — adopt whatever it returns
-        // so the next --resume works.
-        let effectiveSession = sessionId
-        if (obj.session_id && obj.session_id !== sessionId) {
-          const sessions = loadSessions()
-          sessions[chatId] = obj.session_id
-          saveSessions(sessions)
-          effectiveSession = obj.session_id
-        }
+      // Persist the server-side session id (Claude Code occasionally renames).
+      let effectiveSession = sessionId
+      if (serverSessionId && serverSessionId !== sessionId) {
+        const sessions = loadSessions()
+        sessions[chatId] = serverSessionId
+        saveSessions(sessions)
+        effectiveSession = serverSessionId
+      }
+
+      if (!finalEvent) {
+        logger.error({ chatId }, 'claude-code finished without a result event')
         resolve({
-          text: (obj.result ?? '').trim() || '(Claude Code 没有返回文本)',
+          text: '(Claude Code 没有返回 result 事件)',
           sessionId: effectiveSession,
-          costUsd: obj.total_cost_usd,
-          durationSec,
-          stopReason: obj.stop_reason,
-        })
-      } catch (err) {
-        logger.error(
-          { err, head: stdout.slice(0, 400), chatId },
-          'failed to parse claude-code json output',
-        )
-        resolve({
-          text: stdout.slice(0, 1500).trim() || '(Claude Code 无输出)',
-          sessionId,
           costUsd: undefined,
           durationSec,
-          stopReason: 'unparseable',
+          stopReason: 'no-result',
+          toolCalls,
         })
+        return
       }
+
+      if (finalEvent.is_error) {
+        logger.warn({ chatId, finalEvent }, 'claude-code reported is_error')
+      }
+
+      resolve({
+        text: (finalEvent.result ?? '').trim() || '(Claude Code 没有返回文本)',
+        sessionId: effectiveSession,
+        costUsd: finalEvent.total_cost_usd,
+        durationSec,
+        stopReason: finalEvent.stop_reason,
+        toolCalls,
+      })
     })
 
     child.on('error', (err) => {
@@ -236,7 +327,41 @@ function runOnce(
         costUsd: undefined,
         durationSec: (Date.now() - startedAt) / 1000,
         stopReason: 'spawn-error',
+        toolCalls: 0,
       })
     })
   })
+}
+
+/** One-line human summary of a tool_use input — for logs and (future) UI. */
+function summariseToolInput(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Bash':
+      return String(input['command'] ?? '').slice(0, 120)
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+      return String(input['file_path'] ?? input['path'] ?? '').slice(0, 120)
+    case 'Grep':
+      return `${String(input['pattern'] ?? '').slice(0, 80)} in ${String(input['path'] ?? '.')}`
+    case 'Glob':
+      return String(input['pattern'] ?? '').slice(0, 120)
+    default:
+      return JSON.stringify(input).slice(0, 120)
+  }
+}
+
+/** Compact a tool_result content payload (string or array of text blocks) to a string. */
+function stringifyToolResult(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b) =>
+        b && typeof b === 'object' && 'text' in (b as Record<string, unknown>)
+          ? String((b as { text: string }).text ?? '')
+          : '',
+      )
+      .join('')
+  }
+  return ''
 }

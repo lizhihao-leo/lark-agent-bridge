@@ -168,8 +168,9 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 4** — Tool-use loop exposing a whitelisted subset of `lark-cli` to the LLM
 - [x] **Phase 5** — CI, contributing guide, security policy, i18n
 - [x] **Phase 6** — Claude Code headless backend (`BACKEND=claude-code`, sandboxed agent loop)
-- [ ] **Phase 7** — image / file replies back to Feishu (so QR codes etc. render natively)
-- [ ] **Phase 8** — Docker image, npm publish, first `v0.1.0` GitHub release
+- [x] **Phase 7** — Streaming output (real-time tool logs) + "⏳ thinking…" placeholder + user-mode systemd hardening
+- [ ] **Phase 8** — image / file replies back to Feishu (so QR codes etc. render natively)
+- [ ] **Phase 9** — Docker image, npm publish, first `v0.1.0` GitHub release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

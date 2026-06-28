@@ -153,8 +153,9 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 4** — LLM 工具循环，已审 lark-cli 工具白名单
 - [x] **Phase 5** — CI、CONTRIBUTING、SECURITY、中英双语
 - [x] **Phase 6** — Claude Code headless 后端（沙箱 agent loop）
-- [ ] **Phase 7** — 图片/文件回复（飞书原生附件，二维码等能内联展示）
-- [ ] **Phase 8** — Docker 镜像、npm publish、v0.1.0 GitHub Release
+- [x] **Phase 7** — 流式输出（实时工具日志）+ "⏳ 思考中…" 占位 + user-mode systemd
+- [ ] **Phase 8** — 图片/文件回复（飞书原生附件，二维码等能内联展示）
+- [ ] **Phase 9** — Docker 镜像、npm publish、v0.1.0 GitHub Release
 
 进度跟踪：[issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues)
 

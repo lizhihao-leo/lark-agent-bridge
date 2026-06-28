@@ -69,6 +69,17 @@ const Env = z.object({
    */
   CLAUDE_CODE_EXTRA_ARGS: z.string().default(''),
 
+  /**
+   * Send an immediate "⏳ 思考中…" placeholder to Feishu while Claude Code
+   * is running, then recall it after the real reply lands. Improves UX for
+   * the multi-second latency without needing interactive cards. Only
+   * affects BACKEND=claude-code.
+   */
+  SHOW_THINKING_PLACEHOLDER: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
 })
 

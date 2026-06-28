@@ -32,9 +32,14 @@ mkdir -p "$UNIT_DIR"
 install -m 0644 "$UNIT_SRC" "$UNIT_DST"
 
 # Allow user services to keep running after logout — otherwise the bridge
-# would die when you ssh out.
-sudo loginctl enable-linger "$INSTANCE" >/dev/null 2>&1 || \
-  echo "warning: could not enable-linger; bridge will stop when you log out."
+# would die when you ssh out. enable-linger requires sudo; check the
+# resulting state, not just sudo's exit code (some sudo configurations
+# return 0 even on prompt-skip).
+sudo loginctl enable-linger "$INSTANCE" >/dev/null 2>&1 || true
+if [[ "$(loginctl show-user "$INSTANCE" 2>/dev/null | grep -F Linger=)" != "Linger=yes" ]]; then
+  echo "warning: linger is NOT enabled for $INSTANCE; the bridge will stop"
+  echo "         when you log out. Run manually: sudo loginctl enable-linger $INSTANCE"
+fi
 
 systemctl --user daemon-reload
 systemctl --user enable --now "lark-agent-bridge@$INSTANCE.service"

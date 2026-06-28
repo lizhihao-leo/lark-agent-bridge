@@ -5,18 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Claude Code backend
+## [Unreleased]
 
 ### Added
-- **Claude Code headless backend** (`src/llm-claude-code.ts`): when `BACKEND=claude-code`, every Feishu message spawns a `claude -p --bare --dangerously-skip-permissions --output-format json` subprocess against a sandboxed working directory. The agent gets the full Claude Code toolset (Bash / Read / Write / Edit / Grep, plus any installed MCP servers and skills) — not just the 5 lark-cli wrappers from Phase 4.
-- Per-chat session continuity via deterministic UUIDv4-shaped `--session-id` derived from `chat_id`, persisted in `<sandbox>/.bridge-sessions.json`. Resume falls back gracefully if the local map is wiped but the server-side session still exists.
-- New env: `BACKEND` (`anthropic-sdk` | `claude-code`, default `anthropic-sdk`), `CLAUDE_CODE_SANDBOX`, `CLAUDE_CODE_TIMEOUT_SEC`, `CLAUDE_CODE_EXTRA_ARGS`.
-- Worker logs `cost_usd`, `duration_sec`, `stop_reason` for every Claude Code turn — observable from journalctl out of the box.
-- Verified live: a single Feishu message "查看我近期写了那些文档" caused Claude Code to enumerate the sandbox, recognise the question needed Feishu docs API, run `lark-cli auth login --no-wait --json` and `lark-cli auth qrcode` autonomously, and reply with a verification URL plus a generated PNG. Cost: $0.05, latency: 14s.
+- **Streaming output for `BACKEND=claude-code`**: `llm-claude-code.ts` now spawns Claude Code with `--output-format stream-json --verbose` and parses the NDJSON event stream live. Tool-use, tool-result, and partial text events are forwarded to a new `onProgress` callback and surfaced in the worker's logs in real time.
+- **"⏳ 思考中…" placeholder**: when `SHOW_THINKING_PLACEHOLDER=true` (default) and the Claude Code backend is in use, the bridge sends an immediate placeholder reply within ~1 second, then recalls it when the real reply lands. Smooths over the 5–15 s tool-loop latency. The recall is best-effort — if it fails (Feishu time window, permission), the user just sees two messages.
+- `lark/reply.ts`: `reply()` now returns `{ ok, replyMessageId }`, and a new `recall(messageId)` helper wraps `lark-cli im messages delete --yes`.
+- New env: `SHOW_THINKING_PLACEHOLDER=true|false` (default `true`).
 
-### Notes
-- The `anthropic-sdk` backend remains the default — it is cheaper and faster for plain chat. Switch to `claude-code` when you want agentic file/Bash work in-band.
-- Sandbox is enforced by `cwd` only (Claude Code cannot read above its cwd unless `--add-dir` is passed). The user running the bridge owns the sandbox; it does not need to be root.
+### Changed
+- `deploy/systemd/lark-agent-bridge@.service`: rewritten for **user-mode systemd**. Removed `User=`, `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths` (these are system-mode features that produce `216/GROUP` failures under user systemd). Kept restart budget, SIGTERM cascade, journal output, 15 s graceful-stop window. `StartLimitIntervalSec`/`StartLimitBurst` moved into `[Unit]` (correct section).
+- `deploy/install-systemd.sh`: enable-linger detection now checks `loginctl show-user` rather than relying on `sudo`'s exit code (which can lie in some configurations).
+
+### Verified
+- systemd service runs cleanly via `systemctl --user enable --now lark-agent-bridge@$USER`, SIGTERM cascades to `lark-cli` children, 4-process control group (worker + lark-cli wrapper + consumer + bus daemon), CPU 565 ms cold-start, 63 MB RSS.
+- Streaming demo on real Feishu chat: "现在的时间" → placeholder sent at 1 s → tool-free direct text streamed at 4.7 s → final reply at 5.7 s → placeholder recalled at 7 s.
+
+## [Phase 6] — Claude Code backend
+
+### Added
 
 ### Added
 - Phase 0 baseline: TypeScript skeleton, ESLint + Prettier + EditorConfig, MIT license, env-driven config (`zod`), structured logs (`pino`), in-memory session store, NDJSON event consumer, async dispatch, Anthropic SDK reply path.
