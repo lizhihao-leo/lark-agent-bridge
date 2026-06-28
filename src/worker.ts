@@ -174,8 +174,16 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
       )
     }
 
-    const textBody = stripped.trim() || (images.length > 0 ? '(see images)' : body)
-    await reply({ messageId: evt.message_id, body: textBody, format })
+    const textBody = stripped.trim()
+    if (textBody) {
+      await reply({ messageId: evt.message_id, body: textBody, format })
+    } else if (images.length === 0) {
+      // No images to send AND nothing left to say — surface an explicit note
+      // so the user doesn't think we silently dropped the turn.
+      await reply({ messageId: evt.message_id, body: '(空回复)', format: 'text' })
+    }
+    // If stripped is empty but we have images, skip the text reply entirely —
+    // the images themselves are the message.
 
     for (const img of images) {
       logger.info({ chat: evt.chat_id, image: img.relPath, alt: img.alt }, 'sending image reply')

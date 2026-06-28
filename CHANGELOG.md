@@ -12,9 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `src/lark/images.ts`: pure-function `extractLocalImages(body, sandboxDir)` returning `{ images, skipped, stripped }`. The `stripped` text replaces each surfaced ref with `[图片: <alt>]` (or `[图片]` if alt is empty) so the text reply still reads coherently.
 - `src/lark/reply.ts`: new `replyImage({ messageId, image, cwd })` helper. Same error-handling contract as `reply()` — logs and resolves `{ ok: false }` rather than throwing.
 
+### Changed
+- `worker.ts`: when the LLM reply contains **only** local image refs (text body is empty after extraction), the bridge now skips the text reply entirely instead of sending a placeholder string. Empty-and-no-images still gets an explicit `(空回复)` so dropped turns are visible.
+
+### Fixed
+- Docs / comments aligned to current behaviour:
+  - `README.md`, `README.zh-CN.md`, `docs/architecture.md` — `--output-format` updated from `json` to `stream-json --verbose` (was stale since Phase 7); Phase 8 marked done in both roadmaps; `BACKEND` / `CLAUDE_CODE_SANDBOX` added to the EN config table.
+  - `docs/architecture.md` — failure-mode table rewritten to describe what actually happens now (was full of "Phase N will…" promises that have all shipped); Phase 6 diagram updated; new Phase 7 streaming + Phase 8 image-reply sections.
+  - `docs/deployment.md`, `SECURITY.md` — removed false hardening claim that the unit enables `NoNewPrivileges` / `ProtectSystem` / `PrivateTmp` / `ReadWritePaths` (Phase 7 deliberately removed those when switching to user-mode systemd; they fail with `216/GROUP` there).
+  - `src/lark/consume.ts` — comment said "in-memory dedup set"; dedup has lived in SQLite since Phase 2.
+- Dead code: removed `replyText()` from `src/lark/reply.ts` — Phase 0/1 compat shim with zero callers in the current tree.
+
 ### Verified
+- End-to-end on real Feishu: prompted the bot to render a chart, observed (1) a `post` reply with the local-file ref replaced by `[图片: Phase 8 test]`, (2) an `image` reply carrying an `img_v3_…` key uploaded by lark-cli. Round-trip 40 s, $0.135, 4 tool calls.
 - Unit-style sanity check on the extractor with five inputs (cwd-relative path, absolute-in-sandbox path, https URL, `img_…` key, `..` escape attempt, missing file) — only valid sandbox files were extracted; URL and key refs were left untouched; the `..` and missing-file cases were correctly skipped.
-- `lark-cli im +messages-send --image out/test-dot.png --dry-run` with cwd inside the sandbox confirmed lark-cli accepts the cwd-relative path and prepares the upload pipeline.
+- `npm run lint` / `typecheck` / `build` clean.
 
 ## [Phase 7] — streaming + thinking placeholder + user-mode systemd
 

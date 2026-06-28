@@ -80,6 +80,8 @@ All knobs live in `.env`. See [`.env.example`](.env.example) for the full list.
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Model ID |
 | `LARK_EVENT_KEY` | `im.message.receive_v1` | Feishu event to consume |
 | `LARK_EVENT_AS` | `bot` | Identity for event consumption |
+| `BACKEND` | `anthropic-sdk` | `anthropic-sdk` or `claude-code` |
+| `CLAUDE_CODE_SANDBOX` | `~/lark-bot-sandbox` | cwd for `claude-code` backend (also used to resolve image refs) |
 | `MAX_INPUT_CHARS` | `4000` | Truncate user messages above this |
 | `MAX_HISTORY_TURNS` | `12` | Per-chat context window |
 | `MAX_TOKENS_REPLY` | `1024` | Cap on `max_tokens` for the LLM call |
@@ -129,13 +131,19 @@ endpoint.
 
 ### `claude-code` — agentic, sandboxed
 
-Spawns `claude -p --bare --dangerously-skip-permissions --output-format json`
+Spawns `claude -p --bare --dangerously-skip-permissions --output-format stream-json --verbose`
 per Feishu message. Claude Code gets the full agent loop (Bash / Read /
 Write / Edit / Grep + any MCP servers and skills you've installed) but
 its cwd is locked to `CLAUDE_CODE_SANDBOX` (default `~/lark-bot-sandbox`).
 Per-chat conversation state is preserved via Claude Code's own
 `--session-id` / `--resume` machinery; we map each Feishu `chat_id` to a
 deterministic UUIDv4 in `<sandbox>/.bridge-sessions.json`.
+
+The bridge parses the streaming NDJSON output live: tool-use events go to
+the logs in real time, and `![alt](path)` markdown referencing files in
+the sandbox is automatically uploaded back to Feishu as a native image
+message (Phase 8), so charts / QR codes / screenshots render inline
+rather than appearing as broken markdown.
 
 Best for: multi-step agentic tasks the LLM should plan itself — search
 files, write artefacts, shell out to other CLIs, etc.
@@ -169,8 +177,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 5** — CI, contributing guide, security policy, i18n
 - [x] **Phase 6** — Claude Code headless backend (`BACKEND=claude-code`, sandboxed agent loop)
 - [x] **Phase 7** — Streaming output (real-time tool logs) + "⏳ thinking…" placeholder + user-mode systemd hardening
-- [ ] **Phase 8** — image / file replies back to Feishu (so QR codes etc. render natively)
-- [ ] **Phase 9** — Docker image, npm publish, first `v0.1.0` GitHub release
+- [x] **Phase 8** — Image replies for `BACKEND=claude-code` (sandbox-local PNGs auto-uploaded as Feishu image messages)
+- [ ] **Phase 9** — Rate-limit + user allow-list, vision input, real-time card UI, Docker image, npm publish, `v0.1.0` release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

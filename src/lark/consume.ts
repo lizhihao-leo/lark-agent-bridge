@@ -22,7 +22,9 @@ export interface ConsumerHandle {
  * Auto-restart policy:
  *   - On non-zero exit (excluding voluntary stop), wait `restartDelayMs`
  *     and respawn. This survives transient network blips and lark-cli
- *     bus-daemon restarts without losing the in-memory dedup set.
+ *     bus-daemon restarts. Event dedup is persisted in SQLite (see
+ *     src/store.ts), so a respawn never causes double-handling even if
+ *     Feishu replays events during the gap.
  *
  * Shutdown contract:
  *   - `stop()` first sends SIGTERM to the wrapper child (Node-side

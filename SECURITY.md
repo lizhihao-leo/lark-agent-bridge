@@ -29,10 +29,21 @@ The bridge holds three sensitive things:
 3. **`data/bridge.sqlite`** — contains chat histories. Compromise =
    message content leak.
 
-Mitigations baked into the unit file:
-`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, restricted
-`ReadWritePaths`. Run the bridge as a **non-root** user.
+The bundled systemd unit runs in **user mode**, so confinement is the
+invoking user's existing file-system permissions plus whatever you
+layered on top (linger, dedicated user, container). The unit itself does
+not enable `NoNewPrivileges` / `ProtectSystem` / `ReadWritePaths` —
+those are system-mode-only and break under `systemd --user`. For
+defence-in-depth, run the bridge as a dedicated unprivileged user, or
+inside a container.
 
 The LLM tool list (`src/tools.ts`) is a whitelist by design; pull requests
 that add a `*_delete` or broadcast-style tool will be reviewed extra
 carefully.
+
+For the `claude-code` backend, the sandbox is enforced solely by setting
+`cwd = CLAUDE_CODE_SANDBOX` on the subprocess. Claude Code's built-in
+tools default-deny anything outside cwd, but Bash subprocesses do not —
+absolute paths in shell commands can read elsewhere. Don't run the
+bridge as a user that holds secrets you wouldn't share with whoever can
+DM the bot.

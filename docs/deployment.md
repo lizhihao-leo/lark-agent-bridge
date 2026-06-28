@@ -29,10 +29,14 @@ unit can host multiple users on one box (e.g. one bot per Feishu app).
 
 ### Hardening notes
 
-The unit enables `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
-and limits writable paths to the repo + `~/.lark-cli`. Outbound network
-is unrestricted because the bridge needs both `open.feishu.cn` and your
-LLM endpoint.
+The bundled unit runs in **user mode** (`--user`), so it inherits the
+invoking user's privileges with no additional confinement. We deliberately
+do **not** set `NoNewPrivileges`, `ProtectSystem`, or `ReadWritePaths` —
+those directives are system-mode features and fail at activation under
+`systemd --user` with status `216/GROUP` (Phase 7 removed them after
+hitting this). For tighter isolation, run the bridge as a dedicated
+unprivileged user with no access to the rest of `$HOME`, or use a real
+container.
 
 ## 2. pm2 — for hosts that already use pm2
 

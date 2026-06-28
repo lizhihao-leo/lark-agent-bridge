@@ -175,17 +175,3 @@ export function recall(messageId: string, as: 'bot' | 'user' = 'bot'): Promise<v
     })
   })
 }
-
-/** Convenience wrapper for backwards-compat with Phase 0/1 code. */
-export function replyText(opts: {
-  messageId: string
-  text: string
-  as?: 'bot' | 'user'
-}): Promise<ReplyResult> {
-  return reply({
-    messageId: opts.messageId,
-    body: opts.text,
-    format: 'text',
-    ...(opts.as ? { as: opts.as } : {}),
-  })
-}

@@ -18,9 +18,11 @@
                                            ▼
                               ┌───────────────────────────────────┐
                               │ src/worker.ts                     │
-                              │  ├─ event_id dedup (in-memory)    │
+                              │  ├─ event_id dedup (SQLite)       │
                               │  ├─ session history (per chat)    │
                               │  ├─ src/llm.ts  →  Anthropic SDK  │──> LLM endpoint
+                              │  │   OR                           │
+                              │  │  src/llm-claude-code.ts        │──> spawn `claude -p` (sandboxed)
                               │  └─ src/lark/reply.ts             │──> lark-cli im +messages-reply
                               └───────────────────────────────────┘
 ```
@@ -35,9 +37,9 @@ that in our own webhook would be at best redundant and at worst a security
 liability.
 
 The trade-off is that the daemon must be **online** for messages to arrive in
-real time; Feishu retries for a bounded window but not forever. Phase 2 adds
-SQLite-backed `event_id` dedup so that restarts inside that window don't cause
-double-handling.
+real time; Feishu retries for a bounded window but not forever. SQLite-backed
+`event_id` dedup (in `src/store.ts`) ensures restarts inside that window don't
+cause double-handling.
 
 ### 2. Stdin to `lark-cli event consume` MUST stay open
 
@@ -52,12 +54,13 @@ write to it.
 async task. A slow LLM call cannot back up the event reader, which would
 otherwise pile up unread events and risk re-delivery storms.
 
-### 4. The Anthropic SDK is the abstraction boundary
+### 4. The Anthropic SDK is one backend, not the only one
 
-We deliberately do not expose model/provider details outside `src/llm.ts`.
-Phase 4 will switch to a Strategy with multiple providers (Bedrock, OpenAI-
-compatible, etc.) by re-implementing only that module; everything else stays
-untouched.
+`src/llm.ts` wraps the Anthropic SDK and is the default. `src/llm-claude-code.ts`
+adds a second backend that spawns a headless Claude Code subprocess per
+message (selected via `BACKEND=claude-code`). Adding a third — Bedrock,
+OpenAI-compatible, etc. — means writing one more module and routing it from
+`src/worker.ts`; nothing else has to change.
 
 ### 5. Event payload is flat — no `event` / `header` wrapper
 
@@ -71,20 +74,21 @@ needs).
 
 | Failure | What happens | Mitigation |
 |---|---|---|
-| LLM endpoint returns 5xx / network blip | `handle()` catches, replies with error string, conversation continues | Phase 4 will add provider retry/backoff |
-| `lark-cli event` child dies | `child.on('exit')` propagates to a non-zero process exit; systemd / pm2 restarts the worker | Phase 1 |
-| Duplicate event delivery (Feishu side) | In-memory `seenEvents` set; SQLite in Phase 2 |
-| Reply API failure | Logged, conversation moves on; user sees nothing arrive | Phase 1 will surface to caller (out-of-band notifier) |
-| Worker restart mid-conversation | All in-memory state lost (session history, dedup). Acceptable for chat use | Phase 2 |
+| LLM endpoint returns 5xx / network blip | `handle()` catches, replies with error string, conversation continues | Anthropic SDK retries internally; bridge surfaces the final error rather than masking it |
+| `lark-cli event` child dies | `consume.ts` auto-respawns after `restartDelayMs` (2 s); systemd restarts the whole worker if it ever crashes | `src/lark/consume.ts` + `deploy/systemd/...` |
+| Duplicate event delivery (Feishu side) | `event_id` claimed atomically in SQLite; redelivered events log "duplicate event, skipped" | `src/store.ts:claimEvent` |
+| Reply API failure | Logged, conversation moves on; user sees nothing arrive | `reply.ts` never throws; explicit log line `"reply failed"` |
+| Worker restart mid-conversation | SQLite persists history and dedup; in-flight LLM call is lost (user can resend) | `src/store.ts` |
+| Claude Code subprocess hangs | Killed after `CLAUDE_CODE_TIMEOUT_SEC` (default 180 s); error surfaces to the user | `src/llm-claude-code.ts` |
 
 ---
 
-## Claude Code backend (Phase 6)
+## Claude Code backend (Phase 6+)
 
 ```
 [Feishu event] ──> worker.ts ──> spawn `claude -p --bare \
                                      --dangerously-skip-permissions \
-                                     --output-format json \
+                                     --output-format stream-json --verbose \
                                      --resume <UUID>(or --session-id) \
                                      <user text>`
                                           │
@@ -95,11 +99,16 @@ needs).
                                   + any installed MCP servers / Skills
                                           │
                                           ▼
-                                  stdout: one JSON object
-                                  { result, session_id, stop_reason,
-                                    total_cost_usd, ... }
+                                  stdout: NDJSON stream
+                                  - system/init  → session info
+                                  - assistant    → tool_use / text blocks
+                                  - user         → tool_result blocks
+                                  - result       → final reply + cost
                                           │
-                              worker.ts parses → reply to Feishu
+                              worker.ts streams progress → logs
+                              worker.ts parses final result → reply to Feishu
+                                  ├─ text reply (markdown if formatting found)
+                                  └─ image replies for sandbox-local PNGs (Phase 8)
 ```
 
 ### Why a subprocess per message?
@@ -110,6 +119,28 @@ would need either (a) the Claude Agent SDK, which only speaks
 protocol, which is brittle. A fresh subprocess per message is boring but
 robust: each message sees a clean Node heap, a clean Claude Code instance,
 and crashes can't leak across conversations.
+
+### Streaming output (Phase 7)
+
+`--output-format stream-json --verbose` emits one JSON event per line.
+The bridge parses each line as it arrives and forwards `tool_use`,
+`tool_result`, and partial text events to a progress callback, which logs
+them in real time. The `result` envelope at the end carries the final
+text, `session_id`, `stop_reason`, and `total_cost_usd`. To smooth over
+the 5–15 s tool-loop latency, the bridge also fires a "⏳ 思考中…"
+placeholder reply within ~1 s and recalls it after the real reply lands
+(`SHOW_THINKING_PLACEHOLDER=true`).
+
+### Image replies (Phase 8)
+
+Claude Code can write files into its sandbox cwd and reference them via
+`![alt](path)` markdown. Feishu won't render those (they're local paths,
+not URLs), so the bridge runs `extractLocalImages()` against the final
+reply, replaces each surfaced local-file ref with a `[图片: <alt>]`
+caption in the text reply, then sends each image as a separate Feishu
+image message via `lark-cli im +messages-reply --image <relpath>` with
+`cwd` set to the sandbox dir. URL refs (`https://…`) and pre-uploaded
+keys (`img_…`) pass through to the markdown reply unchanged.
 
 ### Session continuity
 

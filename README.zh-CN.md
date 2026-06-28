@@ -67,6 +67,8 @@ npm run dev
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | LLM endpoint |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | 模型 ID |
 | `LARK_EVENT_KEY` | `im.message.receive_v1` | 订阅的事件 |
+| `BACKEND` | `anthropic-sdk` | `anthropic-sdk` 或 `claude-code` |
+| `CLAUDE_CODE_SANDBOX` | `~/lark-bot-sandbox` | `claude-code` 后端的 cwd（也是图片引用的解析根） |
 | `STORE_PATH` | `data/bridge.sqlite` | SQLite 持久化路径 |
 | `GROUP_TRIGGER` | `mention` | 群消息触发策略（`mention`/`all`/`off`）|
 | `BOT_AT_PREFIX` | _(空)_ | 群里要剥离的机器人 @ 前缀 |
@@ -117,11 +119,15 @@ SQLite。工具调用是 `src/tools.ts` 里 5 个 lark-cli 白名单包装的 6 
 ### `claude-code` — 真 agent、沙箱
 
 每条飞书消息 `spawn` 一个 `claude -p --bare --dangerously-skip-permissions
---output-format json` 子进程。Claude Code 得到完整 agent 能力（Bash /
+--output-format stream-json --verbose` 子进程。Claude Code 得到完整 agent 能力（Bash /
 Read / Write / Edit / Grep + 你装的 MCP / Skills），但 cwd 锁死在
 `CLAUDE_CODE_SANDBOX`（默认 `~/lark-bot-sandbox`）。每个飞书 `chat_id`
 对应一个稳定 UUID 作为 `--session-id`，存在 `<sandbox>/.bridge-sessions.json`，
 重启不丢上下文。
+
+bridge 实时解析 NDJSON 流：tool-use 事件直落日志；回复里 `![alt](path)`
+形式引用沙箱内文件时，自动上传成飞书原生 image 消息（Phase 8），所以
+柱状图 / 二维码 / 截图直接内联显示，而不是看到一段破碎的 markdown。
 
 适用：让 LLM 自主多步规划、跑命令、写文件、调外部 CLI 的场景。
 
@@ -154,8 +160,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 5** — CI、CONTRIBUTING、SECURITY、中英双语
 - [x] **Phase 6** — Claude Code headless 后端（沙箱 agent loop）
 - [x] **Phase 7** — 流式输出（实时工具日志）+ "⏳ 思考中…" 占位 + user-mode systemd
-- [ ] **Phase 8** — 图片/文件回复（飞书原生附件，二维码等能内联展示）
-- [ ] **Phase 9** — Docker 镜像、npm publish、v0.1.0 GitHub Release
+- [x] **Phase 8** — `BACKEND=claude-code` 的图片回复（沙箱内 PNG 自动上传成飞书 image 消息）
+- [ ] **Phase 9** — rate limit + 用户白名单、vision 输入、实时 card UI、Docker 镜像、npm publish、v0.1.0 Release
 
 进度跟踪：[issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues)
 
