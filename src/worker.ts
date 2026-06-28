@@ -1,7 +1,8 @@
 import { config } from './config.js'
 import { logger } from './logger.js'
 import { startConsumer } from './lark/consume.js'
-import { reply, recall } from './lark/reply.js'
+import { reply, recall, replyImage } from './lark/reply.js'
+import { extractLocalImages } from './lark/images.js'
 import { chat } from './llm.js'
 import { runClaudeCode, type ClaudeCodeProgress } from './llm-claude-code.js'
 import { Store } from './store.js'
@@ -158,7 +159,35 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
 
     store.appendMessage(evt.chat_id, 'assistant', body)
-    await reply({ messageId: evt.message_id, body, format })
+
+    // Image extraction: Claude Code can produce files in the sandbox and
+    // reference them via `![](path)` markdown. Feishu won't render those as
+    // images, so we extract the local-file refs, send a text reply with the
+    // refs replaced by `[图片: …]` captions, then send each image separately
+    // as an image message. URL/img_xxx refs are left in the body — lark-cli's
+    // markdown mode resolves URLs natively.
+    const { images, skipped, stripped } = extractLocalImages(body, config.CLAUDE_CODE_SANDBOX)
+    if (skipped.length > 0) {
+      logger.warn(
+        { chat: evt.chat_id, skipped: skipped.map((s) => ({ reason: s.reason, ref: s.ref.slice(0, 80) })) },
+        'image refs skipped (kept as markdown)',
+      )
+    }
+
+    const textBody = stripped.trim() || (images.length > 0 ? '(see images)' : body)
+    await reply({ messageId: evt.message_id, body: textBody, format })
+
+    for (const img of images) {
+      logger.info({ chat: evt.chat_id, image: img.relPath, alt: img.alt }, 'sending image reply')
+      const r = await replyImage({
+        messageId: evt.message_id,
+        image: img.relPath,
+        cwd: config.CLAUDE_CODE_SANDBOX,
+      })
+      if (!r.ok) {
+        logger.warn({ chat: evt.chat_id, image: img.relPath }, 'image reply failed (continuing)')
+      }
+    }
 
     // Best-effort recall of the placeholder. Done after the final reply lands
     // so the user always has something to read.

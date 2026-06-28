@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Image replies for `BACKEND=claude-code`**: when Claude Code produces `![alt](path)` markdown referencing files inside the sandbox, the bridge now extracts each local-file ref and sends it as a separate Feishu **image message** via `lark-cli im +messages-reply --image <relpath>` (cwd=sandbox). lark-cli handles the upload-then-send flow so we never have to talk to the OpenAPI directly. URLs (`http(s)://`) and pre-uploaded keys (`img_…`) pass through to the markdown reply unchanged (lark-cli's `--markdown` mode auto-resolves URLs). Refs that escape the sandbox, contain `..`, or point at missing files are kept in the text reply with a logged warning rather than dropped silently.
+- `src/lark/images.ts`: pure-function `extractLocalImages(body, sandboxDir)` returning `{ images, skipped, stripped }`. The `stripped` text replaces each surfaced ref with `[图片: <alt>]` (or `[图片]` if alt is empty) so the text reply still reads coherently.
+- `src/lark/reply.ts`: new `replyImage({ messageId, image, cwd })` helper. Same error-handling contract as `reply()` — logs and resolves `{ ok: false }` rather than throwing.
+
+### Verified
+- Unit-style sanity check on the extractor with five inputs (cwd-relative path, absolute-in-sandbox path, https URL, `img_…` key, `..` escape attempt, missing file) — only valid sandbox files were extracted; URL and key refs were left untouched; the `..` and missing-file cases were correctly skipped.
+- `lark-cli im +messages-send --image out/test-dot.png --dry-run` with cwd inside the sandbox confirmed lark-cli accepts the cwd-relative path and prepares the upload pipeline.
+
+## [Phase 7] — streaming + thinking placeholder + user-mode systemd
+
+### Added
 - **Streaming output for `BACKEND=claude-code`**: `llm-claude-code.ts` now spawns Claude Code with `--output-format stream-json --verbose` and parses the NDJSON event stream live. Tool-use, tool-result, and partial text events are forwarded to a new `onProgress` callback and surfaced in the worker's logs in real time.
 - **"⏳ 思考中…" placeholder**: when `SHOW_THINKING_PLACEHOLDER=true` (default) and the Claude Code backend is in use, the bridge sends an immediate placeholder reply within ~1 second, then recalls it when the real reply lands. Smooths over the 5–15 s tool-loop latency. The recall is best-effort — if it fails (Feishu time window, permission), the user just sees two messages.
 - `lark/reply.ts`: `reply()` now returns `{ ok, replyMessageId }`, and a new `recall(messageId)` helper wraps `lark-cli im messages delete --yes`.

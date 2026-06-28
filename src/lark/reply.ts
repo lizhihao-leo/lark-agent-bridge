@@ -69,6 +69,69 @@ export function reply(opts: ReplyOptions): Promise<ReplyResult> {
   })
 }
 
+export interface ReplyImageOptions {
+  messageId: string
+  /**
+   * `lark-cli --image` accepts: image key (`img_xxx`), URL, or cwd-relative
+   * local path. **Absolute paths and `..` are rejected** by lark-cli — pass a
+   * relative path AND set `cwd` to the directory it's resolved against.
+   */
+  image: string
+  /** Working directory for the lark-cli child process. Required for local paths. */
+  cwd?: string
+  as?: 'bot' | 'user'
+}
+
+/**
+ * Reply to a Feishu message with an image. Behaves like `reply()` for
+ * errors — logs and resolves `{ ok: false }` rather than throwing.
+ */
+export function replyImage(opts: ReplyImageOptions): Promise<ReplyResult> {
+  const args = [
+    'im',
+    '+messages-reply',
+    '--as',
+    opts.as ?? 'bot',
+    '--message-id',
+    opts.messageId,
+    '--image',
+    opts.image,
+    '--format',
+    'json',
+  ]
+
+  return new Promise((resolve) => {
+    const child = spawn('lark-cli', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+    })
+
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (d) => (stdout += d.toString('utf8')))
+    child.stderr.on('data', (d) => (stderr += d.toString('utf8')))
+
+    child.on('exit', (code) => {
+      if (code === 0) {
+        const id = extractReplyMessageId(stdout)
+        logger.debug({ messageId: opts.messageId, image: opts.image, replyMessageId: id }, 'reply image ok')
+        resolve(id ? { ok: true, replyMessageId: id } : { ok: true })
+      } else {
+        logger.error(
+          { code, messageId: opts.messageId, image: opts.image, stderr: stderr.slice(0, 500) },
+          'reply image failed',
+        )
+        resolve({ ok: false })
+      }
+    })
+
+    child.on('error', (err) => {
+      logger.error({ err: err.message }, 'spawn lark-cli (image) failed')
+      resolve({ ok: false })
+    })
+  })
+}
+
 /** Best-effort extraction of `message_id` from lark-cli JSON output. */
 function extractReplyMessageId(stdout: string): string | undefined {
   try {
