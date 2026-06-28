@@ -102,6 +102,48 @@ ANTHROPIC_MODEL=ark-code-latest
 
 ---
 
+## 两套后端
+
+通过 `.env` 里的 `BACKEND=` 选择，自由切换、互不影响。
+
+### `anthropic-sdk`（默认）— 便宜、快、单轮
+
+每条飞书消息一次 HTTP `messages.create`。会话历史走 bridge 自己的
+SQLite。工具调用是 `src/tools.ts` 里 5 个 lark-cli 白名单包装的 6 轮
+循环，需要 `ENABLE_TOOLS=true` 才打开。
+
+适用：纯聊天、低延迟、成本可控、任意 Anthropic 协议代理。
+
+### `claude-code` — 真 agent、沙箱
+
+每条飞书消息 `spawn` 一个 `claude -p --bare --dangerously-skip-permissions
+--output-format json` 子进程。Claude Code 得到完整 agent 能力（Bash /
+Read / Write / Edit / Grep + 你装的 MCP / Skills），但 cwd 锁死在
+`CLAUDE_CODE_SANDBOX`（默认 `~/lark-bot-sandbox`）。每个飞书 `chat_id`
+对应一个稳定 UUID 作为 `--session-id`，存在 `<sandbox>/.bridge-sessions.json`，
+重启不丢上下文。
+
+适用：让 LLM 自主多步规划、跑命令、写文件、调外部 CLI 的场景。
+
+| | `anthropic-sdk` | `claude-code` |
+|---|---|---|
+| 工具集 | 5 个 lark-cli 包装 | Claude Code 内置 + Bash + MCP |
+| 每条消息成本 | 一次模型调用 | 一般 3–15 次 |
+| 延迟 | 1–3 秒 | 3–15 秒 |
+| 工作目录 | 无 | 沙箱化 |
+| 会话内存 | bridge SQLite | Claude Code session 文件 |
+| 模型供应商 | 任意 Anthropic 兼容 | 同左，Claude Code 也走 `ANTHROPIC_*` env |
+
+```env
+# 火山方舟 ARK + Claude Code 后端
+ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/plan
+ANTHROPIC_AUTH_TOKEN=ark-xxxxxxxx
+BACKEND=claude-code
+CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
+```
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0** — TS 骨架、lint、format、license、env 驱动配置
@@ -109,7 +151,10 @@ ANTHROPIC_MODEL=ark-code-latest
 - [x] **Phase 2** — SQLite 持久化（会话历史 + 幂等去重，重启不丢）
 - [x] **Phase 3** — 群聊 `@` 触发、多消息类型、Markdown 回复
 - [x] **Phase 4** — LLM 工具循环，已审 lark-cli 工具白名单
-- [ ] **Phase 5** — Docker 镜像、npm publish、v0.1.0 GitHub Release
+- [x] **Phase 5** — CI、CONTRIBUTING、SECURITY、中英双语
+- [x] **Phase 6** — Claude Code headless 后端（沙箱 agent loop）
+- [ ] **Phase 7** — 图片/文件回复（飞书原生附件，二维码等能内联展示）
+- [ ] **Phase 8** — Docker 镜像、npm publish、v0.1.0 GitHub Release
 
 进度跟踪：[issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues)
 

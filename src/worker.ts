@@ -3,6 +3,7 @@ import { logger } from './logger.js'
 import { startConsumer } from './lark/consume.js'
 import { reply } from './lark/reply.js'
 import { chat } from './llm.js'
+import { runClaudeCode } from './llm-claude-code.js'
 import { Store } from './store.js'
 import type { FeishuMessageEvent } from './lark/types.js'
 
@@ -91,20 +92,47 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
   )
 
   store.appendMessage(evt.chat_id, 'user', userText)
-  const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
 
   let body: string
   let format: 'text' | 'markdown' = 'text'
-  try {
-    const result = await chat(history)
-    body = result.text
-    // Heuristic: if the LLM included markdown sigils, render as markdown.
-    if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
-  } catch (err) {
-    const e = err as { status?: number; message?: string }
-    logger.error({ status: e.status, msg: e.message }, 'LLM call failed')
-    body = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
+
+  if (config.BACKEND === 'claude-code') {
+    // Claude Code manages its own session/history via --resume; we still
+    // record the turn in our SQLite store for audit + dedup.
+    try {
+      const result = await runClaudeCode(evt.chat_id, userText)
+      body = result.text
+      logger.info(
+        {
+          chat: evt.chat_id,
+          sec: result.durationSec.toFixed(1),
+          cost: result.costUsd,
+          stop: result.stopReason,
+          session: result.sessionId.slice(0, 8),
+        },
+        'claude-code done',
+      )
+    } catch (err) {
+      const e = err as { message?: string }
+      logger.error({ err: e.message }, 'claude-code threw')
+      body = `(Claude Code 失败: ${e.message ?? String(err)})`
+    }
+  } else {
+    // Default backend: one Anthropic-SDK HTTP call with our SQLite-backed
+    // history. Tools (if ENABLE_TOOLS=true) loop inside `chat()`.
+    const history = store.history(evt.chat_id, config.MAX_HISTORY_TURNS * 2)
+    try {
+      const result = await chat(history)
+      body = result.text
+    } catch (err) {
+      const e = err as { status?: number; message?: string }
+      logger.error({ status: e.status, msg: e.message }, 'LLM call failed')
+      body = `(调用模型失败: ${e.status ?? ''} ${e.message ?? String(err)})`
+    }
   }
+
+  // Heuristic: if the response looks like markdown, render as markdown.
+  if (/[`*#>\-_]|\n/.test(body)) format = 'markdown'
 
   store.appendMessage(evt.chat_id, 'assistant', body)
   await reply({ messageId: evt.message_id, body, format })
@@ -113,9 +141,11 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
 export function run(): { stop: () => Promise<void> } {
   logger.info(
     {
+      backend: config.BACKEND,
       model: config.ANTHROPIC_MODEL,
       key: config.LARK_EVENT_KEY,
       groupTrigger: config.GROUP_TRIGGER,
+      sandbox: config.BACKEND === 'claude-code' ? config.CLAUDE_CODE_SANDBOX : undefined,
     },
     'bridge starting',
   )

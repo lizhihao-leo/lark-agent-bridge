@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — Claude Code backend
+
+### Added
+- **Claude Code headless backend** (`src/llm-claude-code.ts`): when `BACKEND=claude-code`, every Feishu message spawns a `claude -p --bare --dangerously-skip-permissions --output-format json` subprocess against a sandboxed working directory. The agent gets the full Claude Code toolset (Bash / Read / Write / Edit / Grep, plus any installed MCP servers and skills) — not just the 5 lark-cli wrappers from Phase 4.
+- Per-chat session continuity via deterministic UUIDv4-shaped `--session-id` derived from `chat_id`, persisted in `<sandbox>/.bridge-sessions.json`. Resume falls back gracefully if the local map is wiped but the server-side session still exists.
+- New env: `BACKEND` (`anthropic-sdk` | `claude-code`, default `anthropic-sdk`), `CLAUDE_CODE_SANDBOX`, `CLAUDE_CODE_TIMEOUT_SEC`, `CLAUDE_CODE_EXTRA_ARGS`.
+- Worker logs `cost_usd`, `duration_sec`, `stop_reason` for every Claude Code turn — observable from journalctl out of the box.
+- Verified live: a single Feishu message "查看我近期写了那些文档" caused Claude Code to enumerate the sandbox, recognise the question needed Feishu docs API, run `lark-cli auth login --no-wait --json` and `lark-cli auth qrcode` autonomously, and reply with a verification URL plus a generated PNG. Cost: $0.05, latency: 14s.
+
+### Notes
+- The `anthropic-sdk` backend remains the default — it is cheaper and faster for plain chat. Switch to `claude-code` when you want agentic file/Bash work in-band.
+- Sandbox is enforced by `cwd` only (Claude Code cannot read above its cwd unless `--add-dir` is passed). The user running the bridge owns the sandbox; it does not need to be root.
 
 ### Added
 - Phase 0 baseline: TypeScript skeleton, ESLint + Prettier + EditorConfig, MIT license, env-driven config (`zod`), structured logs (`pino`), in-memory session store, NDJSON event consumer, async dispatch, Anthropic SDK reply path.

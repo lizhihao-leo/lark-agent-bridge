@@ -113,6 +113,52 @@ including the failure modes the worker is designed to survive.
 
 ---
 
+## Backends
+
+Two backends ship in the box. Pick with `BACKEND=` in `.env`.
+
+### `anthropic-sdk` (default) — cheap, fast, single-turn
+
+One HTTP `messages.create` per Feishu message. Session history comes from
+the bridge's SQLite store; the LLM only sees what we hand it. Tool use
+is an opt-in 6-iteration loop bound to a hand-curated lark-cli whitelist
+(`src/tools.ts`, gated by `ENABLE_TOOLS=true`).
+
+Best for: pure chat, low latency, predictable cost, any Anthropic-protocol
+endpoint.
+
+### `claude-code` — agentic, sandboxed
+
+Spawns `claude -p --bare --dangerously-skip-permissions --output-format json`
+per Feishu message. Claude Code gets the full agent loop (Bash / Read /
+Write / Edit / Grep + any MCP servers and skills you've installed) but
+its cwd is locked to `CLAUDE_CODE_SANDBOX` (default `~/lark-bot-sandbox`).
+Per-chat conversation state is preserved via Claude Code's own
+`--session-id` / `--resume` machinery; we map each Feishu `chat_id` to a
+deterministic UUIDv4 in `<sandbox>/.bridge-sessions.json`.
+
+Best for: multi-step agentic tasks the LLM should plan itself — search
+files, write artefacts, shell out to other CLIs, etc.
+
+| Aspect | `anthropic-sdk` | `claude-code` |
+|---|---|---|
+| Tool inventory | 5 hand-coded lark-cli wrappers | Claude Code's built-ins + Bash + MCP |
+| Per-message cost | one model call | typically 3–15 model calls |
+| Latency | 1–3 s | 3–15 s |
+| Working directory | none | sandboxed |
+| Session memory | bridge SQLite | Claude Code session file |
+| Provider | any Anthropic-compatible endpoint | same — Claude Code respects `ANTHROPIC_*` env |
+
+```env
+# Volcengine ARK example with Claude Code backend
+ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/plan
+ANTHROPIC_AUTH_TOKEN=ark-xxxxxxxx
+BACKEND=claude-code
+CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
+```
+
+---
+
 ## Roadmap
 
 - [x] **Phase 0** — TypeScript skeleton, lint, format, license, env-driven config
@@ -120,7 +166,10 @@ including the failure modes the worker is designed to survive.
 - [x] **Phase 2** — SQLite-backed session + idempotency store (survives restart)
 - [x] **Phase 3** — group-chat `@bot` trigger, multi-format messages, markdown replies
 - [x] **Phase 4** — Tool-use loop exposing a whitelisted subset of `lark-cli` to the LLM
-- [ ] **Phase 5** — Docker image, npm publish, first `v0.1.0` GitHub release
+- [x] **Phase 5** — CI, contributing guide, security policy, i18n
+- [x] **Phase 6** — Claude Code headless backend (`BACKEND=claude-code`, sandboxed agent loop)
+- [ ] **Phase 7** — image / file replies back to Feishu (so QR codes etc. render natively)
+- [ ] **Phase 8** — Docker image, npm publish, first `v0.1.0` GitHub release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 
