@@ -184,7 +184,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 8** — Image replies for `BACKEND=claude-code` (sandbox-local PNGs auto-uploaded as Feishu image messages)
 - [x] **Phase 9** — Real streaming via interactive card PATCH + emoji ack on receive + "🔄 重新生成" card-action button (callback support gated on `ENABLE_CARD_CALLBACK` + console enablement)
 - [x] **Phase 10** — Production hardening: per-user rate limit + user/chat allow-lists, vision input (image messages → sandbox `in/`), "⏹ 停止" card button to abort in-flight runs, Prometheus `/metrics` endpoint
-- [ ] **Phase 11** — Docker image, npm publish, `v0.1.0` release
+- [x] **Phase 11** — Functional slash-commands (`/sandbox on|off`, `/status`, `/new`, `/help`) — `/`-prefixed messages run built-in handlers without an LLM call; an extensible registry makes adding more a one-liner. `/sandbox off` lifts the sandbox (full host filesystem access)
+- [ ] **Phase 12** — Docker image, npm publish, `v0.1.0` release
 
 Tracking in [issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues).
 

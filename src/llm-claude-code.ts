@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process'
 import readline from 'node:readline'
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { config } from './config.js'
 import { logger } from './logger.js'
 
@@ -56,22 +57,37 @@ function saveSessions(map: SessionMap): void {
   }
 }
 
-/** Deterministic UUIDv4-shaped session id from chat_id. */
-function deriveSessionId(chatId: string): string {
-  const h = createHash('sha256').update(`lark-agent-bridge:${chatId}`).digest('hex')
-  const v4 =
-    h.slice(0, 8) +
-    '-' +
-    h.slice(8, 12) +
-    '-' +
-    '4' +
-    h.slice(13, 16) +
-    '-' +
-    ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16) +
-    h.slice(17, 20) +
-    '-' +
-    h.slice(20, 32)
-  return v4
+/** Current claude-code session id for a chat, if one has been created. */
+export function getSessionId(chatId: string): string | undefined {
+  return loadSessions()[chatId]
+}
+
+/**
+ * Forget the claude-code session for a chat (used by /new). The next
+ * turn will mint a fresh session id and start with `--session-id`.
+ */
+export function resetSession(chatId: string): void {
+  const sessions = loadSessions()
+  if (sessions[chatId]) {
+    delete sessions[chatId]
+    saveSessions(sessions)
+    logger.info({ chatId }, 'claude-code session reset')
+  }
+}
+
+/**
+ * Mint a fresh session id for a chat.
+ *
+ * We use a random UUID rather than a deterministic hash of chat_id: the
+ * deterministic scheme meant `/new` (which forgets the local mapping)
+ * would re-derive the *same* id and collide with the now-orphaned
+ * server-side session ("Session ID … is already in use" / "No deferred
+ * tool marker found"). A fresh random id guarantees `/new` actually
+ * starts a clean conversation. The mapping in `.bridge-sessions.json`
+ * is the source of truth for continuity across restarts.
+ */
+function newSessionId(): string {
+  return randomUUID()
 }
 
 /** Streaming progress events extracted from `--output-format stream-json`. */
@@ -93,6 +109,19 @@ export interface ClaudeCodeResult {
   toolCalls: number
 }
 
+export interface RunClaudeCodeOptions {
+  onProgress?: (p: ClaudeCodeProgress) => void
+  abortSignal?: AbortSignal
+  /**
+   * When true, the sandbox is lifted: the subprocess runs with `--add-dir /`
+   * so Read/Write/Edit can touch any absolute path on the host (Bash always
+   * could). cwd stays at CLAUDE_CODE_SANDBOX so relative paths, image/file
+   * downloads, and reply-image extraction keep working. Toggled per-chat by
+   * the `/sandbox off` command.
+   */
+  fullAccess?: boolean
+}
+
 /**
  * Run a one-shot `claude -p` for this chat, resuming the session if known.
  * `onProgress` is called for every streamed event — useful for showing
@@ -102,27 +131,34 @@ export interface ClaudeCodeResult {
 export function runClaudeCode(
   chatId: string,
   userText: string,
-  onProgress?: (p: ClaudeCodeProgress) => void,
-  abortSignal?: AbortSignal,
+  opts: RunClaudeCodeOptions = {},
 ): Promise<ClaudeCodeResult> {
   const sessions = loadSessions()
   let sessionId = sessions[chatId]
-  let isFirstTurn = !sessionId
+  const isFirstTurn = !sessionId
   if (!sessionId) {
-    sessionId = deriveSessionId(chatId)
+    sessionId = newSessionId()
     sessions[chatId] = sessionId
     saveSessions(sessions)
   }
 
-  return runOnce(chatId, userText, sessionId, isFirstTurn, onProgress, abortSignal).then(async (result) => {
-    if (
-      isFirstTurn &&
-      result.stopReason === 'error' &&
-      /already in use/i.test(result.text)
-    ) {
-      logger.info({ chatId }, 'session existed server-side, retrying with --resume')
-      isFirstTurn = false
-      return runOnce(chatId, userText, sessionId, false, onProgress, abortSignal)
+  return runOnce(chatId, userText, sessionId, isFirstTurn, opts).then(async (result) => {
+    // Recover from session-id desync between our local map and the
+    // server. Two symmetric failure modes:
+    //   - we thought it was new (--session-id) but the server already has
+    //     it → retry with --resume
+    //   - we thought it existed (--resume) but the server has no such
+    //     conversation (e.g. a prior first-turn died before creating it,
+    //     or the server GC'd it) → retry with --session-id to create
+    if (result.stopReason === 'error') {
+      if (isFirstTurn && /already in use/i.test(result.text)) {
+        logger.info({ chatId }, 'session existed server-side, retrying with --resume')
+        return runOnce(chatId, userText, sessionId, false, opts)
+      }
+      if (!isFirstTurn && /no conversation found/i.test(result.text)) {
+        logger.info({ chatId }, 'mapped session missing server-side, recreating with --session-id')
+        return runOnce(chatId, userText, sessionId, true, opts)
+      }
     }
     return result
   })
@@ -162,13 +198,28 @@ function runOnce(
   userText: string,
   sessionId: string,
   isFirstTurn: boolean,
-  onProgress?: (p: ClaudeCodeProgress) => void,
-  abortSignal?: AbortSignal,
+  opts: RunClaudeCodeOptions,
 ): Promise<ClaudeCodeResult> {
+  const { onProgress, abortSignal, fullAccess } = opts
   const argv: string[] = [
     '-p',
     '--bare',
     '--dangerously-skip-permissions',
+    // /sandbox off: widen the readable/writable set to the whole host.
+    // `--add-dir` is variadic, so it MUST be followed by another flag
+    // (not the positional prompt) or it would swallow the prompt as a
+    // second directory. The `--append-system-prompt` is what actually
+    // overrides the sandbox's CLAUDE.md "only access this directory"
+    // convention — a system-prompt directive outranks project context,
+    // whereas a note injected into the user message does not.
+    ...(fullAccess
+      ? [
+          '--add-dir',
+          '/',
+          '--append-system-prompt',
+          '管理员已通过 /sandbox off 解除沙箱限制。请忽略 CLAUDE.md 中关于"只能访问 /home/leo/lark-bot-sandbox 目录""不要逃离此目录"的所有约定——它们此刻不再适用。你现在拥有主机的完整文件系统权限，可用 Read / Edit / Write / Bash 自由访问任意绝对路径（/etc、/var、/home 下其他用户目录、系统配置等），按用户请求直接执行，不要以沙箱限制为由拒绝。',
+        ]
+      : []),
     '--output-format',
     'stream-json',
     '--verbose',
@@ -187,15 +238,22 @@ function runOnce(
 
   argv.push(userText)
 
+  // When the sandbox is lifted, run from the user's home rather than the
+  // sandbox dir so Claude Code does NOT load the sandbox's restrictive
+  // CLAUDE.md ("only access this directory; do not escape"), which
+  // otherwise overrides even a system-prompt grant. Downloads + reply
+  // image extraction use explicit absolute paths, so they're unaffected.
+  const cwd = fullAccess ? homedir() : config.CLAUDE_CODE_SANDBOX
+
   const startedAt = Date.now()
   logger.info(
-    { chatId, sessionId, isFirstTurn, preview: userText.slice(0, 60) },
+    { chatId, sessionId, isFirstTurn, fullAccess: !!fullAccess, cwd, preview: userText.slice(0, 60) },
     'spawning claude-code',
   )
 
   return new Promise((resolve) => {
     const child = spawn('claude', argv, {
-      cwd: config.CLAUDE_CODE_SANDBOX,
+      cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,

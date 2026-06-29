@@ -70,8 +70,10 @@ export function downloadResource(opts: {
       }
       let output: string | undefined
       try {
-        const obj = JSON.parse(stdout) as { data?: { output?: string; path?: string } }
-        output = obj.data?.output ?? obj.data?.path ?? opts.output
+        const obj = JSON.parse(stdout) as {
+          data?: { saved_path?: string; output?: string; path?: string }
+        }
+        output = obj.data?.saved_path ?? obj.data?.output ?? obj.data?.path ?? opts.output
       } catch {
         output = opts.output
       }

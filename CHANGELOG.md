@@ -8,21 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Per-user rate limit + allow-lists**. Token-bucket per `sender_id`, refilled smoothly across a 60 s window (`RATE_PER_USER_PER_MIN=6` default). Throttled users get a ⏰ reaction + an explicit "请约 N 秒后再试" text; the LLM call is skipped. Independent of that, two allow-list envs (`ALLOWED_USERS`, `ALLOWED_CHATS`, both empty by default) silent-drop traffic outside the allow-list — silent because replying would help an attacker confirm the bot is alive. Both gates run before the LLM round-trip.
-- **Vision input** (image messages → claude-code backend). When the bridge receives `message_type === 'image'`, it extracts the `img_…` key from the message content, downloads the binary into `<CLAUDE_CODE_SANDBOX>/in/<message_id>.<ext>` via `lark-cli im +messages-resources-download`, then synthesises a `用户发来了一张图片，已保存到 …，请用 Read 工具查看后回应` user-text turn and dispatches through the normal claude-code pipeline. Claude Code's `Read` tool natively renders images, so the agent self-services. anthropic-sdk backend still politely refuses (`(图片输入仅在 BACKEND=claude-code 后端下支持)`).
-- **"⏹ 停止" card button**. The streaming card carries a danger-styled stop button while the agent is running. Clicking it routes through `card.action.trigger` (already wired in Phase 9), looks up the in-flight `AbortController` keyed by card-message-id, and sends `SIGTERM` to the Claude Code subprocess. The card flushes to a new `aborted` phase (grey header "⏹ 已停止") with whatever partial body had accumulated.
-- **Prometheus `/metrics` endpoint** (`METRICS_PORT=9090`, bound to `127.0.0.1`). Eight series: messages accepted (by type/backend), messages dropped (by reason: allowlist/rate_limited/unsupported_type/group_filter), LLM calls (by backend/outcome including `aborted`), cumulative cost USD, cumulative tool_use count, LLM latency histogram, card-PATCH success/fail counter, card-action callback counter. Hand-rolled exposition (no `prom-client` dep) keeps the binary small.
-- New files: `src/rate-limit.ts` (token bucket), `src/lark/download.ts` (`messages-resources-download` wrapper), `src/metrics.ts` (counters/histograms + HTTP server).
-- New envs (all in `.env.example`): `ALLOWED_USERS`, `ALLOWED_CHATS`, `RATE_PER_USER_PER_MIN`, `METRICS_PORT`. `card.action.trigger` event subscription confirmed working end-to-end on leo's app — `ENABLE_CARD_CALLBACK=true` is now safe to set once Console "Callback Configuration" is enabled.
+- **Functional slash-commands** — `/`-prefixed messages run a built-in handler instead of calling the LLM. Extensible registry in `src/commands.ts` (`register({ name, description, handler })`); adding a command is one call. A handler returns `{ reply, contextNote? }` — `reply` goes straight to the chat, `contextNote` (optional) is recorded as a synthetic user turn so the *next* LLM call knows the command ran. Commands are acked with the emoji but not rate-limited (cheap/local). Shipped commands:
+  - `/sandbox off` — lift the sandbox: subsequent claude-code turns run from `$HOME` (so the sandbox's restrictive `CLAUDE.md` isn't loaded) with `--add-dir /` and an authoritative `--append-system-prompt` granting full host filesystem access. Per-chat, persisted in SQLite.
+  - `/sandbox on` — restore the sandbox (cwd back to `CLAUDE_CODE_SANDBOX`).
+  - `/status` — system info (host, uptime), agent config (backend/model/sandbox/streaming/rate-limit), session context (chat id, claude-code session, message count), and per-chat token cost (turns + cumulative USD).
+  - `/new` — start a fresh session: clears the chat's stored history and resets the claude-code session so the next turn begins clean.
+  - `/help` — list commands. Unknown `/commands` reply with the help text instead of hitting the LLM.
+- `src/commands.ts`, `src/rate-limit.ts`-style isolation: store gains `chat_settings` (per-chat KV) + `chat_stats` (turns + cumulative cost) tables, with `getSetting`/`setSetting`/`recordTurn`/`chatStats`/`clearHistory`.
+- `larkbridge_commands_total{name}` metric.
 
 ### Changed
-- `runClaudeCode(chatId, userText, onProgress?, abortSignal?)` — added optional `AbortSignal`. When signalled mid-flight, the spawned `claude -p` subprocess receives `SIGTERM` (then `SIGKILL` after 1.5 s) and the result resolves with `stopReason: 'aborted'` instead of `error`, so the worker can render the dedicated "已停止" state.
-- `worker.handle()` refactored: ack-emoji + rate-limit moved into a shared `admitAndAck()` gate that both text and image paths call, so vision input is rate-limited identically to text. `bridge starting` log line now includes `ratePerUserPerMin`, `allowedUsers`, `allowedChats`, `metricsPort` sizes/values for quick ops sanity-check.
-- Card builder: new `aborted` phase (grey "⏹ 已停止"); new `showStop` flag rendered as a danger-styled button alongside the existing regenerate button.
+- **Claude Code session ids are now random UUIDs**, not a deterministic hash of `chat_id`. The deterministic scheme meant `/new` would re-derive the *same* id and collide with the orphaned server-side session (`Session ID … already in use` → `No deferred tool marker found`), so a "new" session was never actually new. `runClaudeCode` also gained symmetric self-healing: a `--session-id` that's "already in use" retries with `--resume`, and a `--resume` that finds "No conversation found" retries with `--session-id` (recovers a local map entry whose server session never got created).
+- `runClaudeCode(chatId, text, opts)` — signature consolidated into an options object (`onProgress`, `abortSignal`, `fullAccess`). `fullAccess` (from `/sandbox off`) adds `--add-dir /` (placed before a flag, since it's variadic and would otherwise swallow the prompt), the override system-prompt, and switches cwd to `$HOME`.
+- `src/lark/download.ts` now reads lark-cli's `saved_path` (absolute) so synthesised image/file prompts point at an absolute path that resolves in either sandbox mode.
 
 ### Verified
-- One-turn smoke on real Feishu after restart: text message → card flows through to `✅ 完成`. `curl -s 127.0.0.1:9090/metrics` shows `larkbridge_messages_total{type="text"} 1`, `larkbridge_llm_calls_total{outcome="success"} 1`, `larkbridge_llm_cost_usd_total 0.0285`, `larkbridge_card_patches_total{outcome="ok"} 6`.
+- All four commands round-tripped on real Feishu: `/help`, `/status`, `/sandbox off`, `/new`, plus an unknown `/foobar` → help. Each fired a `functional command` log line with **no** LLM spawn.
+- `/sandbox off` end-to-end: bot read `/etc/hostname` (outside the sandbox) and returned `AGENT`, matching the real file. `/sandbox on` restores the sandbox cwd + CLAUDE.md convention.
+- Sandbox state persists in `chat_settings`; `/new` clears history + resets the session (next turn mints a fresh UUID).
 - `npm run lint` / `typecheck` / `build` clean.
+
+> Note: `/sandbox on` is a *soft* boundary — because the backend runs with `--dangerously-skip-permissions`, the agent can still touch absolute paths if it decides to; the sandbox `CLAUDE.md` is advisory. A hard boundary needs OS-level isolation (dedicated user / container), tracked for a later phase. `/sandbox off`'s grant direction is reliable.
+
+## [Phase 10] — rate limit + allow-lists + vision input + stop button + metrics
+
+### Added
+- **Per-user rate limit + allow-lists**. Token-bucket per `sender_id`, refilled smoothly across a 60 s window (`RATE_PER_USER_PER_MIN=6` default). Throttled users get a ⏰ reaction + an explicit "请约 N 秒后再试" text; the LLM call is skipped. Independent of that, two allow-list envs (`ALLOWED_USERS`, `ALLOWED_CHATS`, both empty by default) silent-drop traffic outside the allow-list. Both gates run before the LLM round-trip.
+- **Vision input** (image messages → claude-code). Extracts the `img_…` key, downloads to `<sandbox>/in/`, synthesises a "用户发来图片…请用 Read 查看" turn. Phase 10.1 generalised this to **file** messages too (`file_…` key, original filename preserved, prompt nudges the agent to shell out to pandoc/pdftotext/unzip for binary docs).
+- **"⏹ 停止" card button**. Routes through `card.action.trigger`, looks up the in-flight `AbortController` keyed by card-message-id, SIGTERMs the subprocess; card flushes to a grey `aborted` phase.
+- **Prometheus `/metrics`** (`METRICS_PORT=9090`, localhost). Hand-rolled exposition, no `prom-client`: messages/dropped/llm-calls/cost/tool-calls/latency-histogram/card-patches/card-actions.
+- New files: `src/rate-limit.ts`, `src/lark/download.ts`, `src/metrics.ts`. New envs: `ALLOWED_USERS`, `ALLOWED_CHATS`, `RATE_PER_USER_PER_MIN`, `METRICS_PORT`.
+
+### Changed
+- `runClaudeCode` gained an `AbortSignal`; on abort, SIGTERM→SIGKILL and `stopReason: 'aborted'`.
+- `worker.handle()` ack-emoji + rate-limit unified into `admitAndAck()` shared by text and image/file paths.
+
+### Verified
+- One-turn smoke: metrics show messages/cost/card-patches incrementing. `.docx` file round-trip downloaded via bot identity. `npm run lint` / `typecheck` / `build` clean.
 
 ## [Phase 9] — emoji ack + streaming card PATCH + card-action callbacks
 

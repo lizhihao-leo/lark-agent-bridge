@@ -140,6 +140,10 @@ export const metrics = {
     'larkbridge_card_actions_total',
     'Card-action callbacks received, by action name (regenerate / stop / unknown).',
   ),
+  commands: new Counter(
+    'larkbridge_commands_total',
+    'Functional slash-commands executed, by name (sandbox / status / new / help / __unknown__).',
+  ),
 }
 
 function exposeAll(): string {
@@ -152,6 +156,7 @@ function exposeAll(): string {
     metrics.llmLatencySec.expose(),
     metrics.cardPatches.expose(),
     metrics.cardActions.expose(),
+    metrics.commands.expose(),
   ].join('\n\n') + '\n'
 }
 

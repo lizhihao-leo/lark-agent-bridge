@@ -166,7 +166,8 @@ CLAUDE_CODE_SANDBOX=/home/leo/lark-bot-sandbox
 - [x] **Phase 8** — `BACKEND=claude-code` 的图片回复（沙箱内 PNG 自动上传成飞书 image 消息）
 - [x] **Phase 9** — 交互卡片真流式 PATCH + emoji 立即 ack + 「🔄 重新生成」按钮回调（需 `ENABLE_CARD_CALLBACK=true` 且飞书后台开启回调）
 - [x] **Phase 10** — 生产加固：每用户限速 + 用户/会话白名单、vision 输入（图片消息落沙箱 `in/`）、「⏹ 停止」按钮中止运行中的对话、Prometheus `/metrics` endpoint
-- [ ] **Phase 11** — Docker 镜像、npm publish、v0.1.0 Release
+- [x] **Phase 11** — 功能性斜杠命令（`/sandbox on|off`、`/status`、`/new`、`/help`）——`/` 开头的消息执行内置功能、不发起模型调用；可扩展注册表，新增命令一行搞定。`/sandbox off` 解除沙箱（主机全文件系统权限）
+- [ ] **Phase 12** — Docker 镜像、npm publish、v0.1.0 Release
 
 进度跟踪：[issues](https://github.com/lizhihao-leo/lark-agent-bridge/issues)
 

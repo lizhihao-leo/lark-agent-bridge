@@ -13,9 +13,11 @@ import { Store } from './store.js'
 import { RateLimiter } from './rate-limit.js'
 import { downloadResource } from './lark/download.js'
 import { startMetricsServer, metrics } from './metrics.js'
+import { parseCommand, isSandboxOff } from './commands.js'
 import type { FeishuMessageEvent } from './lark/types.js'
 
 const store = new Store(config.STORE_PATH)
+const startedAtMs = Date.now()
 
 const allowedUsers = parseList(config.ALLOWED_USERS)
 const allowedChats = parseList(config.ALLOWED_CHATS)
@@ -161,6 +163,41 @@ async function handle(evt: FeishuMessageEvent): Promise<void> {
     config.MAX_INPUT_CHARS,
   )
   if (!userText.trim()) return
+
+  // Functional slash-commands (/sandbox, /status, /new, /help, …) run a
+  // built-in handler instead of calling the LLM. They are NOT rate-limited
+  // (cheap, local) but we still ack them. A handler may emit a
+  // `contextNote` recorded as a user turn so the next LLM call sees that a
+  // system command ran.
+  const cmd = parseCommand(userText)
+  if (cmd) {
+    if (config.ACK_EMOJI) void react(evt.message_id, config.ACK_EMOJI)
+    logger.info(
+      { chat: evt.chat_id, from: evt.sender_id, command: cmd.def.name, args: cmd.args },
+      'functional command',
+    )
+    metrics.commands.inc({ name: cmd.def.name })
+    try {
+      const result = await cmd.def.handler({
+        chatId: evt.chat_id,
+        args: cmd.args,
+        store,
+        startedAtMs,
+      })
+      if (result.contextNote) {
+        store.appendMessage(evt.chat_id, 'user', result.contextNote)
+      }
+      await reply({ messageId: evt.message_id, body: result.reply, format: 'markdown' })
+    } catch (err) {
+      logger.error({ err, command: cmd.def.name }, 'command handler threw')
+      await reply({
+        messageId: evt.message_id,
+        body: `(命令 \`/${cmd.def.name}\` 执行失败)`,
+        format: 'text',
+      })
+    }
+    return
+  }
 
   if (!(await admitAndAck(evt))) return
 
@@ -320,8 +357,18 @@ async function handleResourceMessage(
  * preserves the Phase 7 "⏳ 思考中…" placeholder + Phase 8 image replies.
  */
 async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Promise<void> {
+  const fullAccess = isSandboxOff(store, evt.chat_id)
+  // The claude-code backend keeps its OWN session history and never sees
+  // our SQLite contextNotes, so a `/sandbox off` recorded there is
+  // invisible to the model — it would still refuse with "I can only
+  // access the sandbox". Prepend an explicit per-turn directive while
+  // full access is on so the model actually uses its lifted permissions.
+  const prompt = fullAccess
+    ? `[系统提示：管理员已执行 /sandbox off，沙箱限制已解除。你现在拥有主机完整文件系统权限，可用 Read / Edit / Write / Bash 访问任意绝对路径（如 /etc、/var、其他用户目录等），不要再以"只能访问沙箱目录"为由拒绝。请直接执行下面的用户请求。]\n\n${userText}`
+    : userText
+
   if (config.STREAMING_CARD) {
-    const ok = await tryStreamingCard(evt, userText)
+    const ok = await tryStreamingCard(evt, prompt, fullAccess)
     if (ok) return
     // Fall through to legacy path on send failure.
     logger.warn({ chat: evt.chat_id }, 'streaming card path failed, falling back to text')
@@ -340,13 +387,17 @@ async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Prom
 
   let body: string
   try {
-    const result = await runClaudeCode(evt.chat_id, userText, (p) => logProgress(evt.chat_id, p))
+    const result = await runClaudeCode(evt.chat_id, prompt, {
+      onProgress: (p) => logProgress(evt.chat_id, p),
+      fullAccess,
+    })
     body = result.text
     metrics.llmToolCalls.inc({ backend: 'claude-code' }, result.toolCalls)
     metrics.llmLatencySec.observe({ backend: 'claude-code' }, result.durationSec)
     if (result.costUsd !== undefined) {
       metrics.llmCostUsd.inc({ backend: 'claude-code' }, result.costUsd)
     }
+    store.recordTurn(evt.chat_id, result.costUsd ?? 0)
     metrics.llmCalls.inc({
       backend: 'claude-code',
       outcome: result.stopReason === 'error' ? 'error' : 'success',
@@ -413,7 +464,11 @@ async function handleClaudeCode(evt: FeishuMessageEvent, userText: string): Prom
  * Streaming-card path. Returns `true` on success, `false` if the card
  * couldn't even be sent (so the caller can fall back to the text path).
  */
-async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Promise<boolean> {
+async function tryStreamingCard(
+  evt: FeishuMessageEvent,
+  userText: string,
+  fullAccess: boolean,
+): Promise<boolean> {
   // 1. Send the initial "thinking" card, with the stop button already
   //    showing so the user can bail out before the first tool fires.
   const initialCard = buildCard({
@@ -474,7 +529,11 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
   let costUsd: number | undefined
   let stopReason: string | undefined
   try {
-    const result = await runClaudeCode(evt.chat_id, userText, onProgress, abort.signal)
+    const result = await runClaudeCode(evt.chat_id, userText, {
+      onProgress,
+      abortSignal: abort.signal,
+      fullAccess,
+    })
     body = result.text
     costUsd = result.costUsd
     stopReason = result.stopReason
@@ -483,6 +542,7 @@ async function tryStreamingCard(evt: FeishuMessageEvent, userText: string): Prom
     if (result.costUsd !== undefined) {
       metrics.llmCostUsd.inc({ backend: 'claude-code' }, result.costUsd)
     }
+    store.recordTurn(evt.chat_id, result.costUsd ?? 0)
     logger.info(
       {
         chat: evt.chat_id,
